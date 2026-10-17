@@ -171,7 +171,6 @@ def check_access(
                 hanh_dong=f"{action}:{tier}",
                 bang=bang,
                 ket_qua=result_str,
-                chi_tiet=reason,
                 db_path=db_path
             )
         except Exception as e:

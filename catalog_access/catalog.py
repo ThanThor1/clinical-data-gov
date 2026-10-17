@@ -79,7 +79,6 @@ def register_dataset(
         hanh_dong="register_dataset",
         bang=name,
         ket_qua="SUCCESS",
-        chi_tiet=f"Đăng ký bảng vào catalog thuộc tầng {tier_clean}, bệnh viện {hospital}",
         db_path=db_path
     )
 
@@ -156,7 +155,6 @@ def delete_dataset(name: str, deleted_by: str = "admin", db_path: Optional[str] 
             hanh_dong="delete_dataset",
             bang=name,
             ket_qua="SUCCESS",
-            chi_tiet="Xóa bảng khỏi catalog",
             db_path=db_path
         )
     return deleted

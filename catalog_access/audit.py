@@ -38,12 +38,10 @@ def log_event(
     bang_nao: Optional[str] = None,
     ket_qua: Optional[str] = None,
     thoi_gian: Optional[str] = None,
-    chi_tiet: str = "",
     actor: Optional[str] = None,
     action: Optional[str] = None,
     target_table: Optional[str] = None,
     result: Optional[str] = None,
-    details: Optional[str] = None,
     db_path: Optional[str] = None,
     **kwargs
 ) -> int:
@@ -54,7 +52,6 @@ def log_event(
     - làm gì (lam_gi / hanh_dong / action): Hành động thực hiện (e.g., 'read', 'write', 'check_gate', 'schema_check').
     - bảng nào (bang_nao / bang / target_table): Bảng dữ liệu mục tiêu chịu tác động.
     - kết quả (ket_qua / result): Trạng thái kết quả ('ALLOWED', 'DENIED', 'BLOCKED', 'SUCCESS', 'FAILED').
-    - chi_tiet (chi_tiet / details, optional): Ghi chú bổ sung hoặc lý do lỗi/chặn.
     
     Hỗ trợ linh hoạt:
       + Cách 1 (theo bảng Mục 4, Trang 5): log_event(ai, hanh_dong, bang, ket_qua)
@@ -67,7 +64,6 @@ def log_event(
     v_lam_gi = lam_gi or hanh_dong or action
     v_bang_nao = bang_nao or bang or target_table
     v_ket_qua = ket_qua or result
-    v_chi_tiet = chi_tiet or details or ""
 
     if len(args) == 4:
         # log_event(ai, hanh_dong, bang, ket_qua)
@@ -75,30 +71,13 @@ def log_event(
         v_lam_gi = args[1]
         v_bang_nao = args[2]
         v_ket_qua = args[3]
-    elif len(args) == 5:
-        # Kiểm tra nếu arg[0] là chuỗi thời gian hoặc datetime
-        arg0_str = str(args[0])
-        if any(char in arg0_str for char in ['-', ':', '/']) and len(arg0_str) >= 8:
-            # log_event(thoi_gian, ai, lam_gi, bang_nao, ket_qua)
-            v_thoi_gian = args[0]
-            v_ai = args[1]
-            v_lam_gi = args[2]
-            v_bang_nao = args[3]
-            v_ket_qua = args[4]
-        else:
-            # log_event(ai, hanh_dong, bang, ket_qua, chi_tiet)
-            v_ai = args[0]
-            v_lam_gi = args[1]
-            v_bang_nao = args[2]
-            v_ket_qua = args[3]
-            v_chi_tiet = args[4]
-    elif len(args) >= 6:
+    elif len(args) >= 5:
+        # log_event(thoi_gian, ai, lam_gi, bang_nao, ket_qua)
         v_thoi_gian = args[0]
         v_ai = args[1]
         v_lam_gi = args[2]
         v_bang_nao = args[3]
         v_ket_qua = args[4]
-        v_chi_tiet = args[5]
 
     # Nếu thời gian chưa có, tự động lấy thời gian hiện tại
     if not v_thoi_gian:
@@ -108,7 +87,6 @@ def log_event(
     v_ai = str(v_ai or "unknown_user")
     v_lam_gi = str(v_lam_gi or "unknown_action")
     v_bang_nao = str(v_bang_nao or "")
-    v_chi_tiet = str(v_chi_tiet or "")
 
     # Chuẩn hóa trạng thái kết quả
     ket_qua_str = str(v_ket_qua or "DENIED").strip().upper()
@@ -125,23 +103,21 @@ def log_event(
     # Lưu đồng thời cả các cột tiếng Việt và tiếng Anh để tương thích tuyệt đối
     cursor.execute("""
     INSERT INTO audit_log (
-        thoi_gian, ai, lam_gi, bang_nao, ket_qua, chi_tiet,
-        timestamp, actor, action, target_table, result, details
+        thoi_gian, ai, lam_gi, bang_nao, ket_qua,
+        timestamp, actor, action, target_table, result
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
     """, (
         v_thoi_gian,
         v_ai,
         v_lam_gi,
         v_bang_nao,
         ket_qua_str,
-        v_chi_tiet,
         v_thoi_gian,
         v_ai,
         v_lam_gi,
         v_bang_nao,
-        ket_qua_str,
-        v_chi_tiet
+        ket_qua_str
     ))
 
     log_id = cursor.lastrowid
@@ -182,13 +158,11 @@ def get_audit_logs(
         COALESCE(lam_gi, action) AS lam_gi,
         COALESCE(bang_nao, target_table) AS bang_nao,
         COALESCE(ket_qua, result) AS ket_qua,
-        COALESCE(chi_tiet, details) AS chi_tiet,
         COALESCE(timestamp, thoi_gian) AS timestamp,
         COALESCE(actor, ai) AS actor,
         COALESCE(action, lam_gi) AS action,
         COALESCE(target_table, bang_nao) AS target_table,
-        COALESCE(result, ket_qua) AS result,
-        COALESCE(details, chi_tiet) AS details
+        COALESCE(result, ket_qua) AS result
     FROM audit_log 
     WHERE 1=1
     """
@@ -226,8 +200,7 @@ if __name__ == "__main__":
         ai="engineer_alice",
         hanh_dong="read",
         bang="raw_patient_hospital_A",
-        ket_qua="ALLOWED",
-        chi_tiet="Kỹ sư dữ liệu đọc tầng raw"
+        ket_qua="ALLOWED"
     )
     print(f"[OK] Cách 1 (4 tham số) thành công, Log ID = {id1}")
 
@@ -247,8 +220,7 @@ if __name__ == "__main__":
         ai="pipeline_worker",
         lam_gi="check_gate",
         bang_nao="raw_patient_hospital_B",
-        ket_qua="BLOCKED",
-        chi_tiet="Chặn dữ liệu do đổi tên cột phá vỡ hợp đồng"
+        ket_qua="BLOCKED"
     )
     print(f"[OK] Cách 3 (Keyword arguments tiếng Việt) thành công, Log ID = {id3}")
 

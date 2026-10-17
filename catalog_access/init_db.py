@@ -100,13 +100,11 @@ def init_database(db_path: Optional[str] = None, seed_sample_data: bool = True) 
         lam_gi TEXT NOT NULL,
         bang_nao TEXT DEFAULT '',
         ket_qua TEXT NOT NULL CHECK(ket_qua IN ('ALLOWED', 'DENIED', 'BLOCKED', 'SUCCESS', 'FAILED')),
-        chi_tiet TEXT DEFAULT '',
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         actor TEXT,
         action TEXT,
         target_table TEXT DEFAULT '',
-        result TEXT,
-        details TEXT DEFAULT ''
+        result TEXT
     );
     """)
 
@@ -119,10 +117,17 @@ def init_database(db_path: Optional[str] = None, seed_sample_data: bool = True) 
         ("lam_gi", "TEXT DEFAULT ''"),
         ("bang_nao", "TEXT DEFAULT ''"),
         ("ket_qua", "TEXT DEFAULT ''"),
-        ("chi_tiet", "TEXT DEFAULT ''"),
     ]:
         if col not in existing_cols:
             cursor.execute(f"ALTER TABLE audit_log ADD COLUMN {col} {col_type};")
+
+    # Xóa các cột chi_tiet và details nếu còn tồn tại
+    for drop_col in ["chi_tiet", "details"]:
+        if drop_col in existing_cols:
+            try:
+                cursor.execute(f"ALTER TABLE audit_log DROP COLUMN {drop_col};")
+            except Exception:
+                pass
 
     # Cập nhật dữ liệu cũ nếu thoi_gian hoặc ai còn trống
     cursor.execute("""
@@ -131,8 +136,7 @@ def init_database(db_path: Optional[str] = None, seed_sample_data: bool = True) 
         ai = COALESCE(NULLIF(ai, ''), actor),
         lam_gi = COALESCE(NULLIF(lam_gi, ''), action),
         bang_nao = COALESCE(NULLIF(bang_nao, ''), target_table),
-        ket_qua = COALESCE(NULLIF(ket_qua, ''), result),
-        chi_tiet = COALESCE(NULLIF(chi_tiet, ''), details)
+        ket_qua = COALESCE(NULLIF(ket_qua, ''), result)
     WHERE thoi_gian IS NULL OR thoi_gian = '';
     """)
 
@@ -215,21 +219,21 @@ def _seed_default_data_if_empty(cursor: sqlite3.Cursor, conn: sqlite3.Connection
     cursor.execute("SELECT COUNT(*) FROM audit_log;")
     if cursor.fetchone()[0] == 0:
         sample_audit = [
-            ("2026-10-16 08:00:00", "admin_system", "init_system", "metadata.db", "SUCCESS", "Khởi tạo cơ sở dữ liệu metadata ban đầu",
-             "2026-10-16 08:00:00", "admin_system", "init_system", "metadata.db", "SUCCESS", "Khởi tạo cơ sở dữ liệu metadata ban đầu"),
-            ("2026-10-16 08:30:00", "engineer_alice", "read", "raw_patient_hospital_A", "ALLOWED", "Kỹ sư dữ liệu đọc tầng raw để lập trình pipeline",
-             "2026-10-16 08:30:00", "engineer_alice", "read", "raw_patient_hospital_A", "ALLOWED", "Kỹ sư dữ liệu đọc tầng raw để lập trình pipeline"),
-            ("2026-10-16 09:15:00", "pipeline_worker", "check_gate", "raw_patient_hospital_B", "BLOCKED", "Cổng kiểm soát chặn dữ liệu BV B do đổi tên cột phá vỡ hợp đồng",
-             "2026-10-16 09:15:00", "pipeline_worker", "check_gate", "raw_patient_hospital_B", "BLOCKED", "Cổng kiểm soát chặn dữ liệu BV B do đổi tên cột phá vỡ hợp đồng"),
-            ("2026-10-16 10:00:00", "researcher_bob", "read", "ai_ready_icu_mortality", "ALLOWED", "Nhà nghiên cứu đọc tập dữ liệu AI-ready đã ẩn danh",
-             "2026-10-16 10:00:00", "researcher_bob", "read", "ai_ready_icu_mortality", "ALLOWED", "Nhà nghiên cứu đọc tập dữ liệu AI-ready đã ẩn danh"),
-            ("2026-10-16 10:05:00", "researcher_bob", "read", "raw_patient_hospital_A", "DENIED", "Truy cập bị từ chối: Nhà nghiên cứu không có quyền xem dữ liệu thô bệnh viện A",
-             "2026-10-16 10:05:00", "researcher_bob", "read", "raw_patient_hospital_A", "DENIED", "Truy cập bị từ chối: Nhà nghiên cứu không có quyền xem dữ liệu thô bệnh viện A"),
+            ("2026-10-16 08:00:00", "admin_system", "init_system", "metadata.db", "SUCCESS",
+             "2026-10-16 08:00:00", "admin_system", "init_system", "metadata.db", "SUCCESS"),
+            ("2026-10-16 08:30:00", "engineer_alice", "read", "raw_patient_hospital_A", "ALLOWED",
+             "2026-10-16 08:30:00", "engineer_alice", "read", "raw_patient_hospital_A", "ALLOWED"),
+            ("2026-10-16 09:15:00", "pipeline_worker", "check_gate", "raw_patient_hospital_B", "BLOCKED",
+             "2026-10-16 09:15:00", "pipeline_worker", "check_gate", "raw_patient_hospital_B", "BLOCKED"),
+            ("2026-10-16 10:00:00", "researcher_bob", "read", "ai_ready_icu_mortality", "ALLOWED",
+             "2026-10-16 10:00:00", "researcher_bob", "read", "ai_ready_icu_mortality", "ALLOWED"),
+            ("2026-10-16 10:05:00", "researcher_bob", "read", "raw_patient_hospital_A", "DENIED",
+             "2026-10-16 10:05:00", "researcher_bob", "read", "raw_patient_hospital_A", "DENIED"),
         ]
         cursor.executemany("""
-        INSERT INTO audit_log (thoi_gian, ai, lam_gi, bang_nao, ket_qua, chi_tiet,
-                               timestamp, actor, action, target_table, result, details)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        INSERT INTO audit_log (thoi_gian, ai, lam_gi, bang_nao, ket_qua,
+                               timestamp, actor, action, target_table, result)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """, sample_audit)
 
     conn.commit()

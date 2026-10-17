@@ -391,7 +391,7 @@ elif "4. 📋 Audit" in menu:
 
     if not audit_df.empty:
         # Hiển thị sổ audit gồm đúng 5 thông tin cốt lõi: thời gian, ai, làm gì, bảng nào, kết quả
-        display_cols = ['id', 'thoi_gian', 'ai', 'lam_gi', 'bang_nao', 'ket_qua', 'chi_tiet']
+        display_cols = ['id', 'thoi_gian', 'ai', 'lam_gi', 'bang_nao', 'ket_qua']
         available_cols = [c for c in display_cols if c in audit_df.columns]
         display_audit = audit_df[available_cols].copy()
         display_audit = display_audit.rename(columns={
@@ -400,8 +400,7 @@ elif "4. 📋 Audit" in menu:
             'ai': 'Ai (Người Dùng)',
             'lam_gi': 'Làm Gì (Hành Động)',
             'bang_nao': 'Bảng Nào',
-            'ket_qua': 'Kết Quả',
-            'chi_tiet': 'Chi Tiết'
+            'ket_qua': 'Kết Quả'
         })
         st.dataframe(display_audit, use_container_width=True, hide_index=True)
     else:
