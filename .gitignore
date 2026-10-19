@@ -5,10 +5,5 @@ data/**/*.parquet
 __pycache__/
 .venv/
 .DS_Store
-docs/
-
-../../../../../../Downloads/moi/clinical-data-gov/pipeline/explore_data
-../../../../../../Downloads/moi/clinical-data-gov/data/01_landing
-../../../../../../Downloads/moi/clinical-data-gov/data/02_staging
-
 .idea/
+.ipynb_checkpoints/
