@@ -1,0 +1,50 @@
+# Cấu hình chính sách phân quyền truy cập theo vai trò (RBAC)
+# Quản lý bởi: Người 3 (Catalog, Phân quyền, Audit & Báo cáo)
+
+roles:
+  # 1. Kỹ sư dữ liệu (Data Engineer): Có toàn quyền truy cập để vận hành pipeline dữ liệu
+  data_engineer:
+    display_name: "Kỹ sư dữ liệu"
+    allowed_tiers:
+      - raw
+      - standardized
+      - ai_ready
+      - catalog
+    can_read: true
+    can_write: true
+    description: "Toàn quyền đọc/ghi mọi tầng dữ liệu và cấu hình hệ thống"
+
+  # 2. Nhà nghiên cứu (Researcher): Chỉ được phép đọc tầng AI-ready (đã ẩn danh & kiểm định)
+  researcher:
+    display_name: "Nhà nghiên cứu"
+    allowed_tiers:
+      - ai_ready
+      - catalog
+    can_read: true
+    can_write: false
+    description: "Chỉ được phép đọc tầng AI-ready đã ẩn danh; tuyệt đối cấm dữ liệu thô và nhạy cảm"
+
+  # 3. Khách (Guest / Viewer): Chỉ được xem danh bạ bảng dữ liệu
+  guest:
+    display_name: "Khách xem"
+    allowed_tiers:
+      - catalog
+    can_read: false
+    can_write: false
+    description: "Chỉ được tra cứu metadata catalog, không được đọc dữ liệu chi tiết của các tầng"
+
+# Danh sách người dùng được gán vai trò mẫu (Users Mapping)
+users:
+  engineer_alice: data_engineer
+  engineer_1: data_engineer
+  ky_su_du_lieu: data_engineer
+
+  researcher_bob: researcher
+  researcher_1: researcher
+  nha_nghien_cuu: researcher
+
+  guest_charlie: guest
+  guest_1: guest
+  khach: guest
+
+default_role: guest
