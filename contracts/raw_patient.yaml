@@ -1,0 +1,76 @@
+# Hợp đồng dữ liệu: bảng bệnh nhân THÔ của từng bệnh viện (eICU patient.csv)
+# Áp dụng chung cho raw_patient_hospital_A, _B, _C.
+#
+# Ý nghĩa các trường của một cột:
+#   type           : int | float | string | category
+#   required       : true  -> cột bắt buộc phải có (thiếu / đổi tên / xóa = BREAKING)
+#   nullable       : false -> không được có ô trống nào
+#   max_null_pct   : % ô trống tối đa cho phép (vượt = BREAKING)
+#   min / max      : khoảng giá trị hợp lý (chỉ BREAKING khi > 1% số dòng nằm ngoài)
+#   allowed_values : tập giá trị cho phép (chỉ BREAKING khi > 1% số dòng sai)
+#   sensitive      : cột nhạy cảm (định danh bệnh nhân) -> phải giả danh hóa trước tầng AI-ready
+
+name: raw_patient
+description: Bảng bệnh nhân thô, giữ nguyên định dạng gốc của eICU
+applies_to:
+  - raw_patient_hospital_*
+owner: Đội IT bệnh viện nguồn
+version: "1.0"
+tier: raw
+
+columns:
+  patientunitstayid:
+    type: int
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: true
+
+  uniquepid:
+    type: string
+    required: false
+    nullable: true
+    sensitive: true
+
+  hospitalid:
+    type: int
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: false
+
+  # age trong eICU là CHUỖI: có thể là "45", "> 89" hoặc rỗng -> không đặt min/max ở tầng raw
+  age:
+    type: string
+    required: true
+    nullable: true
+    max_null_pct: 30
+    sensitive: false
+
+  # gender gốc: Male / Female (thỉnh thoảng Other / Unknown / rỗng)
+  gender:
+    type: category
+    required: true
+    nullable: true
+    max_null_pct: 30
+    allowed_values: [Male, Female, Other, Unknown]
+    sensitive: false
+
+  # Cân nặng lúc nhập ICU (kg). Dữ liệu thật thiếu 12-22,5% -> ngưỡng 30%
+  admissionweight:
+    type: float
+    required: true
+    nullable: true
+    max_null_pct: 30
+    min: 20
+    max: 400
+    sensitive: false
+
+  # Nhãn tử vong ICU dùng cho bài toán AI
+  unitdischargestatus:
+    type: category
+    required: true
+    nullable: true
+    max_null_pct: 30
+    allowed_values: [Alive, Expired]
+    sensitive: false

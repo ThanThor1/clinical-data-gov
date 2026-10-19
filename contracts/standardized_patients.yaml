@@ -1,0 +1,69 @@
+# Hợp đồng dữ liệu: bảng bệnh nhân CHUẨN HÓA (mọi bệnh viện cùng một khuôn)
+# Ý nghĩa các trường: xem contracts/raw_patient.yaml
+
+name: standardized_patients
+description: Bệnh nhân của cả 3 bệnh viện sau khi chuẩn hóa tên cột, kiểu và đơn vị
+applies_to:
+  - standardized_patients
+owner: Nhóm Kỹ thuật dữ liệu (Người 1)
+version: "1.0"
+tier: standardized
+
+columns:
+  patient_id:
+    type: int
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: true
+
+  # "> 89" ở tầng raw được chuẩn hóa thành số nguyên (ví dụ 90)
+  age:
+    type: int
+    required: true
+    nullable: true
+    max_null_pct: 30
+    min: 0
+    max: 120
+    sensitive: false
+
+  # Male -> M, Female -> F, còn lại -> U
+  gender:
+    type: category
+    required: true
+    nullable: true
+    max_null_pct: 30
+    allowed_values: [M, F, U]
+    sensitive: false
+
+  weight_kg:
+    type: float
+    required: true
+    nullable: true
+    max_null_pct: 30
+    min: 20
+    max: 400
+    sensitive: false
+
+  source_hospital:
+    type: string
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: false
+
+  # Nhịp tim trung bình của bệnh nhân, tính từ raw_vital (không bắt buộc: viện B không có vital)
+  heartrate_mean:
+    type: float
+    required: false
+    nullable: true
+    min: 20
+    max: 300
+    sensitive: false
+
+  unitdischargestatus:
+    type: category
+    required: false
+    nullable: true
+    allowed_values: [Alive, Expired]
+    sensitive: false

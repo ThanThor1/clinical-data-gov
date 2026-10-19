@@ -1,0 +1,51 @@
+# Hợp đồng dữ liệu: bảng sinh hiệu định kỳ THÔ của từng bệnh viện (eICU vitalPeriodic.csv)
+# Ý nghĩa các trường: xem contracts/raw_patient.yaml
+# Lưu ý: Bệnh viện B có 0 dòng vitalPeriodic -> bảng rỗng vẫn phải ĐẠT.
+
+name: raw_vital
+description: Bảng sinh hiệu đo định kỳ (nhịp tim, SpO2, ...) thô
+applies_to:
+  - raw_vital_hospital_*
+owner: Đơn vị ICU bệnh viện nguồn
+version: "1.0"
+tier: raw
+
+columns:
+  vitalperiodicid:
+    type: int
+    required: false
+    nullable: false
+    sensitive: false
+
+  patientunitstayid:
+    type: int
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: true
+
+  observationoffset:
+    type: int
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: false
+
+  # Nhịp tim (lần/phút). Viện C có 1 dòng < 20 trong 12.262 dòng -> chỉ WARNING
+  heartrate:
+    type: float
+    required: true
+    nullable: true
+    max_null_pct: 30
+    min: 20
+    max: 300
+    sensitive: false
+
+  # SpO2 (%) - không bắt buộc, chỉ kiểm khoảng nếu có
+  sao2:
+    type: float
+    required: false
+    nullable: true
+    min: 0
+    max: 100
+    sensitive: false

@@ -1,4 +1,6 @@
-def check_gate(ten_bang, du_lieu, cong):
-    """cong: 'gate1' (schema/hợp đồng) hoặc 'gate2' (chất lượng).
-    Trả về (dat: bool, danh_sach_loi: list[str]). Tạm thời luôn đạt."""
-    return True, []
+"""
+File cũ, giữ lại để không làm hỏng code nào lỡ import `governance.gate`.
+Code thật nằm ở governance/gates.py (đúng tên trong CLAUDE.md) - hãy import từ đó.
+"""
+
+from governance.gates import check_gate, check_gate_detailed  # noqa: F401

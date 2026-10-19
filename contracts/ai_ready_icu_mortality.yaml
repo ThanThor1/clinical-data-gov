@@ -1,0 +1,64 @@
+# Hợp đồng dữ liệu: bảng AI-READY cho bài toán dự đoán tử vong ICU
+# Ý nghĩa các trường: xem contracts/raw_patient.yaml
+# Tầng này KHÔNG được chứa cột định danh: patient_id đã được thay bằng patient_hash.
+
+name: ai_ready_icu_mortality
+description: Dữ liệu sạch, đã giả danh hóa, dùng huấn luyện mô hình dự đoán tử vong ICU
+applies_to:
+  - ai_ready_icu_mortality
+owner: Nhóm nghiên cứu AI
+version: "1.0"
+tier: ai_ready
+
+columns:
+  # Mã giả danh (băm SHA-256 của patient_id) -> không còn là dữ liệu nhạy cảm
+  patient_hash:
+    type: string
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: false
+
+  age:
+    type: int
+    required: true
+    nullable: true
+    max_null_pct: 30
+    min: 0
+    max: 120
+    sensitive: false
+
+  gender:
+    type: category
+    required: true
+    nullable: true
+    max_null_pct: 30
+    allowed_values: [M, F, U]
+    sensitive: false
+
+  weight_kg:
+    type: float
+    required: true
+    nullable: true
+    max_null_pct: 30
+    min: 20
+    max: 400
+    sensitive: false
+
+  heartrate_mean:
+    type: float
+    required: false
+    nullable: true
+    min: 20
+    max: 300
+    sensitive: false
+
+  # Nhãn: 1 = tử vong trong ICU (unitdischargestatus == 'Expired'), 0 = sống
+  icu_mortality:
+    type: int
+    required: true
+    nullable: false
+    max_null_pct: 0
+    min: 0
+    max: 1
+    sensitive: false

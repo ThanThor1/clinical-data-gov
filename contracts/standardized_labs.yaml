@@ -1,0 +1,39 @@
+# Hợp đồng dữ liệu: bảng xét nghiệm CHUẨN HÓA
+# Ý nghĩa các trường: xem contracts/raw_patient.yaml
+
+name: standardized_labs
+description: Kết quả xét nghiệm của cả 3 bệnh viện sau khi chuẩn hóa
+applies_to:
+  - standardized_labs
+owner: Nhóm Kỹ thuật dữ liệu (Người 1)
+version: "1.0"
+tier: standardized
+
+columns:
+  patient_id:
+    type: int
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: true
+
+  lab_name:
+    type: string
+    required: true
+    nullable: true
+    max_null_pct: 30
+    sensitive: false
+
+  lab_value:
+    type: float
+    required: true
+    nullable: true
+    max_null_pct: 30
+    sensitive: false
+
+  source_hospital:
+    type: string
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: false

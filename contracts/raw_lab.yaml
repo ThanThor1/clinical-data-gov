@@ -1,0 +1,47 @@
+# Hợp đồng dữ liệu: bảng xét nghiệm THÔ của từng bệnh viện (eICU lab.csv)
+# Ý nghĩa các trường: xem contracts/raw_patient.yaml
+
+name: raw_lab
+description: Bảng kết quả xét nghiệm thô, mỗi dòng là một lần xét nghiệm
+applies_to:
+  - raw_lab_hospital_*
+owner: Khoa xét nghiệm bệnh viện nguồn
+version: "1.0"
+tier: raw
+
+columns:
+  labid:
+    type: int
+    required: false
+    nullable: false
+    sensitive: false
+
+  patientunitstayid:
+    type: int
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: true
+
+  # Thời điểm có kết quả, tính bằng phút so với lúc nhập ICU (có thể âm)
+  labresultoffset:
+    type: int
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: false
+
+  labname:
+    type: string
+    required: true
+    nullable: true
+    max_null_pct: 30
+    sensitive: false
+
+  # Mỗi loại xét nghiệm có thang đo khác nhau nên không đặt min/max chung
+  labresult:
+    type: float
+    required: true
+    nullable: true
+    max_null_pct: 30
+    sensitive: false
