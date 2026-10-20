@@ -1,13 +1,17 @@
-import os
 import pandas as pd
+import os
 
-LANDING_DIR = "../data/01_landing/"
-STAGING_DIR = "../data/02_staging/"
+ROOT = os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+)
+
+LANDING_DIR = os.path.join(ROOT, "data", "01_landing")
+STAGING_DIR = os.path.join(ROOT, "data", "02_staging")
 
 # Đường dẫn đến các file lab.csv, patient.csv,
-LAB_DATA_ORIGINAL = LANDING_DIR + "lab.csv"
-PATIENT_DATA_ORIGINAL = LANDING_DIR + "patient.csv"
-VITAL_PERIODIC_DATA_ORIGINAL = LANDING_DIR + "vitalPeriodic.csv"
+LAB_DATA_ORIGINAL = os.path.join(LANDING_DIR, "lab.csv")
+PATIENT_DATA_ORIGINAL = os.path.join(LANDING_DIR, "patient.csv")
+VITAL_PERIODIC_DATA_ORIGINAL = os.path.join(LANDING_DIR, "vitalPeriodic.csv")
 
 HOSPITAL_NAMES = ["hospital_A", "hospital_B", "hospital_C"]
 
@@ -26,11 +30,11 @@ def main():
     for hospital_id, hospital_name in zip(top_3_hospital_ids, HOSPITAL_NAMES):
         print(f"\n--- Đang xử lý {hospital_name} (ID: {hospital_id}) ---")
 
-        target_dir = os.path.join(STAGING_DIR,hospital_name)
+        target_dir = os.path.join(STAGING_DIR, hospital_name)
         os.makedirs(target_dir, exist_ok=True)
 
         # 3.2. Lọc bảng patient của bệnh viện này
-        patient_subset = patient_df[patient_df["hospitalid"]==hospital_id]
+        patient_subset = patient_df[patient_df["hospitalid"] == hospital_id]
 
         # 3.3. Lấy danh sách các patientunitstayid của bệnh viện này
         valid_stay_ids = patient_subset["patientunitstayid"].unique()
@@ -51,5 +55,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
