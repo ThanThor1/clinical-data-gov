@@ -56,12 +56,14 @@ columns:
     allowed_values: [Male, Female, Other, Unknown]
     sensitive: false
 
-  # Cân nặng lúc nhập ICU (kg). Dữ liệu thật thiếu 12-22,5% -> ngưỡng 30%
+  # Cân nặng lúc nhập ICU (kg). Dữ liệu thật thiếu 12-22,5% cả viện, nhưng kiểm tra theo
+  # TỪNG ĐỢT thì có đợt thiếu 30,8% (viện A đợt 3: 13 bệnh nhân) -> ngưỡng 40%.
+  # Lỗi xóa trắng 50% cân nặng vẫn bị chặn.
   admissionweight:
     type: float
     required: true
     nullable: true
-    max_null_pct: 30
+    max_null_pct: 40
     min: 20
     max: 400
     sensitive: false

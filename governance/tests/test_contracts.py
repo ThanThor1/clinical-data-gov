@@ -39,7 +39,7 @@ def test_khop_chinh_xac_va_khong_co_hop_dong():
 def test_luat_phan_anh_du_lieu_that():
     raw = find_contract("raw_patient_hospital_B")["columns"]
     assert raw["age"]["type"] == "string"
-    assert raw["admissionweight"]["max_null_pct"] == 30
+    assert raw["admissionweight"]["max_null_pct"] == 40
     assert (raw["admissionweight"]["min"], raw["admissionweight"]["max"]) == (20, 400)
     assert {"Male", "Female"} <= set(raw["gender"]["allowed_values"])
 

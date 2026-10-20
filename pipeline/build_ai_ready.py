@@ -6,8 +6,9 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from catalog_access import register_dataset
+from governance.contracts import find_contract, get_sensitive_columns
 from governance.gates import check_gate
-from governance.lineage import record_lineage
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(ROOT, "data")
@@ -34,32 +35,45 @@ def build_ai_ready(df):
     return df[cols]
 
 def main():
+    """Tạo bảng AI-ready từ standardized_patients. Trả về DataFrame đã lưu, None nếu bị chặn."""
     path = os.path.join(STD_DIR, "standardized_patients.csv")
     if not os.path.exists(path):
         print(f"Không tìm thấy {path}")
-        return
+        return None
 
     df = pd.read_csv(path)
     print(f"Đọc {len(df)} dòng từ standardized_patients")
 
     ai_df = build_ai_ready(df)
+    # Đợt không có vital (viện B) có thể làm cột này bị đọc thành chuỗi -> ép về float
+    ai_df["heartrate_mean"] = pd.to_numeric(ai_df["heartrate_mean"], errors="coerce").astype(float)
 
-    # Check gate
-    dat, loi = check_gate("ai_ready_icu_mortality", ai_df, "gate1")
-    if not dat:
-        print("AI_READY BỊ CHẶN:")
-        print("\n".join(loi))
-        return
+    # Check gate: gate1 (schema + hợp đồng) rồi gate2 (chất lượng)
+    for gate in ("gate1", "gate2"):
+        dat, loi = check_gate("ai_ready_icu_mortality", ai_df, gate)
+        if not dat:
+            print(f"AI_READY BỊ CHẶN ở {gate}:")
+            print("\n".join(loi))
+            return None
 
-    # Record lineage
-    record_lineage("standardized_patients", "ai_ready_icu_mortality",
-                   {"patient_id": "patient_hash",
-                    "unitdischargestatus": "icu_mortality"})
+    # Lineage standardized -> ai_ready đã được ghi đủ ở standardize.py (record_sample_lineage)
 
     # Lưu
     out = os.path.join(AI_DIR, "ai_ready_icu_mortality.csv")
     ai_df.to_csv(out, index=False)
     print(f"Đã lưu {len(ai_df)} dòng vào {out}")
+
+    # Đăng ký catalog; tầng AI-ready đã giả danh hóa nên hợp đồng không còn cột nhạy cảm
+    hop_dong = find_contract("ai_ready_icu_mortality")
+    register_dataset(
+        "ai_ready_icu_mortality",
+        hospital="Toàn hệ thống",
+        tier="ai_ready",
+        owner="Nhóm nghiên cứu AI",
+        sensitive_columns=",".join(get_sensitive_columns(hop_dong)) if hop_dong else "",
+        registered_by="pipeline_build_ai_ready",
+    )
+    return ai_df
 
 if __name__ == "__main__":
     main()

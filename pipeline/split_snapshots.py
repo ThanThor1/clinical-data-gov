@@ -1,11 +1,13 @@
 import os
+import shutil
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 
-# Đường dẫn cấu hình
-STAGING_DIR = "../data/02_staging"
-SAVE_DIR = "../data/raw"
+# Đường dẫn cấu hình (tính từ vị trí file, chạy được từ bất kỳ thư mục nào)
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STAGING_DIR = os.path.join(ROOT, "data", "02_staging")
+SAVE_DIR = os.path.join(ROOT, "data", "raw")
 HOSPITALS = ["hospital_A", "hospital_B", "hospital_C"]
 
 
@@ -26,6 +28,11 @@ def split_into_timestamps():
         print(f"--- Đang xử lý {hosp} ---")
         hosp_dir = os.path.join(STAGING_DIR, hosp)
         save_dir = os.path.join(SAVE_DIR, hosp)
+
+        # 0. Xóa các đợt cũ của viện (sinh ra từ lần chạy trước, có thể khác ngày)
+        #    để data/raw/hospital_X chỉ còn đúng 3 đợt của lần chia này
+        if os.path.isdir(save_dir):
+            shutil.rmtree(save_dir)
 
         # 1. Đọc 3 file dữ liệu gốc của bệnh viện này
         p_df = pd.read_csv(os.path.join(hosp_dir, "patient.csv"))

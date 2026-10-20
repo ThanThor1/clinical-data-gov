@@ -41,14 +41,40 @@ def test_do_thi_co_node_cot_va_node_bang(db_path):
     assert g.has_edge("standardized_patients.weight_kg", f"{AI}.weight_kg")
 
 
-def test_moi_bang_raw_noi_toi_ai_ready(db_path):
+def test_bang_raw_patient_va_vital_noi_toi_ai_ready(db_path):
     record_sample_lineage(db_path)
     for vien in "ABC":
-        for loai in ("patient", "lab", "vital"):
+        for loai in ("patient", "vital"):
             bang = f"raw_{loai}_hospital_{vien}"
             assert get_affected_ai_tables(bang, db_path=db_path) == [AI], bang
         assert get_downstream_tables(f"raw_patient_hospital_{vien}", db_path=db_path) == [
             AI, "standardized_patients"]
+
+
+def test_bang_raw_lab_chi_toi_standardized_labs(db_path):
+    """AI-ready chưa có cột lab -> raw_lab chỉ chảy tới standardized_labs, không tới AI-ready."""
+    record_sample_lineage(db_path)
+    assert not any(c["source_table"] == "standardized_labs" for c in get_lineage_edges(db_path))
+    for vien in "ABC":
+        bang = f"raw_lab_hospital_{vien}"
+        assert get_downstream_tables(bang, db_path=db_path) == ["standardized_labs"]
+        assert get_affected_ai_tables(bang, db_path=db_path) == []
+        assert get_affected_ai_tables(bang, "labresult", db_path) == []
+
+
+def test_du_duong_di_muc_cot_cho_ca_3_vien(db_path):
+    """Các cột mà inject_errors làm hỏng phải nối được tới AI-ready ở cả 3 viện."""
+    record_sample_lineage(db_path)
+    for vien in "ABC":
+        for bang, cot, cot_ai in [
+            (f"raw_patient_hospital_{vien}", "admissionweight", "weight_kg"),
+            (f"raw_patient_hospital_{vien}", "gender", "gender"),
+            (f"raw_patient_hospital_{vien}", "age", "age"),
+            (f"raw_patient_hospital_{vien}", "patientunitstayid", "patient_hash"),
+            (f"raw_vital_hospital_{vien}", "heartrate", "heartrate_mean"),
+        ]:
+            assert get_affected_ai_tables(bang, cot, db_path) == [AI], (bang, cot)
+            assert any(p.endswith(f"{AI}.{cot_ai}") for p in get_impact_paths(bang, cot, db_path)), (bang, cot)
 
 
 def test_tra_theo_cot(db_path):

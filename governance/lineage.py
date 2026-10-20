@@ -82,8 +82,8 @@ def record_sample_lineage(db_path: Optional[str] = None) -> None:
                     "heartrate_mean": "heartrate_mean"}, "chọn biến đầu vào AI", db_path)
     record_lineage("standardized_patients", ai, {"unitdischargestatus": "icu_mortality"},
                    "Expired -> 1, Alive -> 0", db_path)
-    record_lineage("standardized_labs", ai, {"lab_value": "lactate_max"},
-                   "lọc lab_name = lactate, lấy max theo bệnh nhân", db_path)
+    # standardized_labs KHÔNG chảy vào ai_ready_icu_mortality (bảng AI-ready hiện chưa có cột lab),
+    # nên lỗi ở raw_lab vẫn được ghi violation nhưng không có bảng AI-ready nào bị ảnh hưởng.
 
 
 # ---------------------------------------------------------------------------

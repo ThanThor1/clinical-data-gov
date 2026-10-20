@@ -174,12 +174,32 @@ def test_loi_xoa_trang_50_phan_tram_can_nang_bi_chan(db):
     dat, loi = check_gate("raw_patient_hospital_A", df, "gate2", db)
     assert dat is False
     assert _loai_loi(db) == ["COMPLETENESS"]
-    assert "vượt ngưỡng 30%" in loi[0]
+    assert "vượt ngưỡng 40%" in loi[0]
+
+
+def test_dot_sach_thieu_30_8_phan_tram_can_nang_van_dat(db):
+    """Viện A đợt 3 thật: 13 bệnh nhân, 4 ô cân nặng trống (30,8%) -> không bị chặn oan."""
+    df = make_patient("A").head(13).copy()
+    df["admissionweight"] = [70.0] * 9 + [np.nan] * 4
+    assert check_gate("raw_patient_hospital_A", df, "gate2", db) == (True, [])
 
 
 # ---------------------------------------------------------------------------
 # Các trường hợp khác
 # ---------------------------------------------------------------------------
+
+def test_loi_o_raw_lab_van_ghi_vi_pham_nhung_khong_anh_huong_ai(db):
+    """raw_lab không chảy vào AI-ready -> vẫn chặn và ghi violation, affected_ai_table để trống."""
+    bang = "raw_lab_hospital_A"
+    df = make_hospital("A")["lab"]
+    check_gate(bang, df, "gate1", db)
+    dat, _ = check_gate(bang, df.drop(columns=["labresult"]), "gate1", db)
+    assert dat is False
+    v = get_violations(db)[0]
+    assert (v["error_type"], v["severity"], v["affected_table"]) == ("SCHEMA_COLUMN_REMOVED", "BREAKING", bang)
+    assert v["affected_ai_table"] == ""
+    audit = get_audit_logs(db_path=db)
+    assert any(a["ai"] == "governance_gate" and a["bang_nao"] == bang and a["ket_qua"] == "BLOCKED" for a in audit)
 
 def test_gia_tri_gioi_tinh_sai(db):
     df = make_patient("A")

@@ -58,12 +58,14 @@ def inject_error(error_type, hospital):
         print("Đã đổi tên cột admissionweight -> weight")
 
     elif error_type == "doi_kieu":
-        # A: admissionweight -> astype(str)
+        # A: admissionweight từ số -> chuỗi có đơn vị ("70.5 kg")
+        # Lưu ý: chỉ astype(str) là KHÔNG đủ với pandas 3 - ô trống vẫn là NaN, ghi ra CSV
+        # vẫn là "70.5" nên đọc lại thành số như cũ, lỗi biến mất.
         df = pd.read_csv(patient_file)
-        # Đổi sang str, các ô trống thành "nan"
-        df["admissionweight"] = df["admissionweight"].astype(str)
+        df["admissionweight"] = df["admissionweight"].map(
+            lambda x: f"{x} kg" if pd.notna(x) else "")
         df.to_csv(patient_file, index=False)
-        print("Đã đổi kiểu cột admissionweight -> str")
+        print("Đã đổi kiểu cột admissionweight -> chuỗi (ví dụ '70.5 kg')")
 
     elif error_type == "xoa_cot":
         # C: xóa cột gender
@@ -121,15 +123,30 @@ def sua_lai(hospital):
             print(f"Đã khôi phục: {file}")
 
 
-if __name__ == "__main__":
+# Mỗi loại lỗi gây cho một viện cố định
+MAPPING_VIEN = {
+    "doi_ten": "B",
+    "doi_kieu": "A",
+    "xoa_cot": "C",
+    "nhip_tim_500": "A",
+    "thieu_can_nang": "B",
+}
+
+
+def gay_loi(error_type):
+    """Gây lỗi `error_type` cho viện tương ứng (đợt 3). Trả về viện bị gây lỗi."""
+    vien = MAPPING_VIEN[error_type]
+    inject_error(error_type, vien)
+    return vien
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description="Gây lỗi giả lập cho đợt 3")
-    parser.add_argument("--loi", type=str, choices=[
-        "doi_ten", "doi_kieu", "xoa_cot", "nhip_tim_500", "thieu_can_nang"
-    ], help="Loại lỗi muốn gây ra")
+    parser.add_argument("--loi", type=str, choices=list(MAPPING_VIEN), help="Loại lỗi muốn gây ra")
     parser.add_argument("--sua-lai", action="store_true", help="Khôi phục đợt 3 từ backup")
     parser.add_argument("--vien", type=str, choices=["A", "B", "C"], help="Viện muốn sửa lại (dành cho --sua-lai)")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.sua_lai:
         if not args.vien:
@@ -137,15 +154,10 @@ if __name__ == "__main__":
         else:
             sua_lai(args.vien)
     elif args.loi:
-        # Tự động map lỗi sang viện theo yêu cầu
-        mapping_vien = {
-            "doi_ten": "B",
-            "doi_kieu": "A",
-            "xoa_cot": "C",
-            "nhip_tim_500": "A",
-            "thieu_can_nang": "B"
-        }
-        vien = mapping_vien[args.loi]
-        inject_error(args.loi, vien)
+        gay_loi(args.loi)
     else:
         print("Vui lòng truyền --loi <ten_loi> hoặc --sua-lai --vien <A/B/C>")
+
+
+if __name__ == "__main__":
+    main()
