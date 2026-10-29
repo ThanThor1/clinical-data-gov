@@ -8,7 +8,9 @@
 #   max_null_pct   : % ô trống tối đa cho phép (vượt = BREAKING)
 #   min / max      : khoảng giá trị hợp lý (chỉ BREAKING khi > 1% số dòng nằm ngoài)
 #   allowed_values : tập giá trị cho phép (chỉ BREAKING khi > 1% số dòng sai)
+#   pattern        : biểu thức chính quy giá trị phải khớp (chỉ BREAKING khi > 1% số dòng sai)
 #   sensitive      : cột nhạy cảm (định danh bệnh nhân) -> phải giả danh hóa trước tầng AI-ready
+#   description    : mô tả cột, hiển thị trong catalog
 
 name: raw_patient
 description: Bảng bệnh nhân thô, giữ nguyên định dạng gốc của eICU
@@ -25,12 +27,14 @@ columns:
     nullable: false
     max_null_pct: 0
     sensitive: true
+    description: Mã lượt nằm ICU của bệnh nhân (định danh)
 
   uniquepid:
     type: string
     required: false
     nullable: true
     sensitive: true
+    description: Mã bệnh nhân duy nhất trên toàn hệ thống eICU (định danh)
 
   hospitalid:
     type: int
@@ -38,6 +42,7 @@ columns:
     nullable: false
     max_null_pct: 0
     sensitive: false
+    description: Mã bệnh viện trong eICU
 
   # age trong eICU là CHUỖI: có thể là "45", "> 89" hoặc rỗng -> không đặt min/max ở tầng raw
   age:
@@ -46,6 +51,7 @@ columns:
     nullable: true
     max_null_pct: 30
     sensitive: false
+    description: Tuổi (chuỗi, người trên 89 tuổi ghi là "> 89")
 
   # gender gốc: Male / Female (thỉnh thoảng Other / Unknown / rỗng)
   gender:
@@ -55,6 +61,7 @@ columns:
     max_null_pct: 30
     allowed_values: [Male, Female, Other, Unknown]
     sensitive: false
+    description: Giới tính
 
   # Cân nặng lúc nhập ICU (kg). Dữ liệu thật thiếu 12-22,5% cả viện, nhưng kiểm tra theo
   # TỪNG ĐỢT thì có đợt thiếu 30,8% (viện A đợt 3: 13 bệnh nhân) -> ngưỡng 40%.
@@ -67,6 +74,7 @@ columns:
     min: 20
     max: 400
     sensitive: false
+    description: Cân nặng lúc nhập ICU (kg)
 
   # Nhãn tử vong ICU dùng cho bài toán AI
   unitdischargestatus:
@@ -76,3 +84,4 @@ columns:
     max_null_pct: 30
     allowed_values: [Alive, Expired]
     sensitive: false
+    description: Tình trạng lúc ra khỏi ICU (Alive / Expired)

@@ -16,6 +16,7 @@ columns:
     required: false
     nullable: false
     sensitive: false
+    description: Mã dòng sinh hiệu
 
   patientunitstayid:
     type: int
@@ -23,6 +24,7 @@ columns:
     nullable: false
     max_null_pct: 0
     sensitive: true
+    description: Mã lượt nằm ICU của bệnh nhân (định danh)
 
   observationoffset:
     type: int
@@ -30,6 +32,7 @@ columns:
     nullable: false
     max_null_pct: 0
     sensitive: false
+    description: Thời điểm đo, số phút tính từ lúc nhập ICU
 
   # Nhịp tim (lần/phút). Viện C có 1 dòng < 20 trong 12.262 dòng -> chỉ WARNING
   heartrate:
@@ -40,6 +43,7 @@ columns:
     min: 20
     max: 300
     sensitive: false
+    description: Nhịp tim (lần/phút)
 
   # SpO2 (%) - không bắt buộc, chỉ kiểm khoảng nếu có
   sao2:
@@ -49,3 +53,4 @@ columns:
     min: 0
     max: 100
     sensitive: false
+    description: Độ bão hòa oxy SpO2 (%)

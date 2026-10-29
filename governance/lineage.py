@@ -7,7 +7,7 @@ Lineage (truy vết nguồn gốc dữ liệu): cột nào của bảng nào ch�
     + node bảng "bang"      và cạnh bảng -> bảng (suy ra từ cạnh cột)
 - Từ đồ thị, tìm mọi bảng phía sau (downstream) và lọc ra bảng tầng AI-ready.
 
-Hàm dùng chung (CLAUDE.md mục 4): record_lineage(nguon, dich, anh_xa_cot)
+Hàm dùng chung (tài liệu phân công mục 4): record_lineage(nguon, dich, anh_xa_cot)
 
 Chạy thử: python -m governance.lineage
 """
@@ -28,16 +28,20 @@ def record_lineage(nguon: str, dich: str, anh_xa_cot: dict[str, str],
     """
     Ghi lineage từ bảng `nguon` sang bảng `dich`.
     anh_xa_cot: {cột_nguồn: cột_đích}, ví dụ {"admissionweight": "weight_kg"}.
-    Mỗi cặp cột thành 1 dòng trong lineage_edges; cặp đã có thì không ghi lại (không trùng).
+    Mỗi cặp cột thành 1 dòng trong lineage_edges; cặp đã có thì không ghi lại (không trùng),
+    chỉ cập nhật mô tả biến đổi nếu mô tả mới khác mô tả cũ.
     """
     conn = get_db_connection(db_path)
     for cot_nguon, cot_dich in anh_xa_cot.items():
         da_co = conn.execute(
-            "SELECT 1 FROM lineage_edges WHERE source_table = ? AND source_column = ? "
+            "SELECT id, transformation FROM lineage_edges WHERE source_table = ? AND source_column = ? "
             "AND target_table = ? AND target_column = ?",
             (nguon, cot_nguon, dich, cot_dich),
         ).fetchone()
-        if not da_co:
+        if da_co and da_co["transformation"] != transformation:
+            conn.execute("UPDATE lineage_edges SET transformation = ? WHERE id = ?",
+                         (transformation, da_co["id"]))
+        elif not da_co:
             conn.execute(
                 "INSERT INTO lineage_edges (source_table, source_column, target_table, "
                 "target_column, transformation) VALUES (?, ?, ?, ?, ?)",
@@ -76,14 +80,19 @@ def record_sample_lineage(db_path: Optional[str] = None) -> None:
 
     ai = "ai_ready_icu_mortality"
     record_lineage("standardized_patients", ai, {"patient_id": "patient_hash"},
-                   "giả danh hóa SHA-256", db_path)
+                   "giả danh hóa HMAC-SHA256 (khóa bí mật)", db_path)
     record_lineage("standardized_patients", ai,
                    {"age": "age", "gender": "gender", "weight_kg": "weight_kg",
                     "heartrate_mean": "heartrate_mean"}, "chọn biến đầu vào AI", db_path)
     record_lineage("standardized_patients", ai, {"unitdischargestatus": "icu_mortality"},
                    "Expired -> 1, Alive -> 0", db_path)
-    # standardized_labs KHÔNG chảy vào ai_ready_icu_mortality (bảng AI-ready hiện chưa có cột lab),
-    # nên lỗi ở raw_lab vẫn được ghi violation nhưng không có bảng AI-ready nào bị ảnh hưởng.
+
+    # Đặc trưng xét nghiệm: AI-ready được ghép từ HAI bảng standardized (patients + labs)
+    for cot_ai, mo_ta in (("creatinine_max", "lấy max theo bệnh nhân, lab_name = creatinine"),
+                          ("glucose_mean", "lấy trung bình theo bệnh nhân, lab_name = glucose")):
+        record_lineage("standardized_labs", ai, {"lab_value": cot_ai}, mo_ta, db_path)
+        record_lineage("standardized_labs", ai, {"lab_name": cot_ai}, "lọc theo loại xét nghiệm", db_path)
+        record_lineage("standardized_labs", ai, {"patient_id": cot_ai}, "ghép theo bệnh nhân", db_path)
 
 
 # ---------------------------------------------------------------------------

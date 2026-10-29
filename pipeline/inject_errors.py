@@ -8,10 +8,13 @@ DATA_DIR = os.path.join(ROOT, "data")
 RAW_DIR = os.path.join(DATA_DIR, "raw")
 BACKUP_DIR = os.path.join(DATA_DIR, "_backup_inject")
 
+# Cố định hạt giống ngẫu nhiên: chạy lại vẫn hỏng đúng những dòng đó (kết quả đánh giá lặp lại được)
+HAT_GIONG = 42
 
-def get_batch_3_dir(hospital):
+
+def get_batch_3_dir(hospital, raw_dir=None):
     """Tìm thư mục đợt 3 (chứa 20-00-00) của viện"""
-    hospital_dir = os.path.join(RAW_DIR, f"hospital_{hospital}")
+    hospital_dir = os.path.join(raw_dir or RAW_DIR, f"hospital_{hospital}")
     if not os.path.isdir(hospital_dir):
         return None
     for folder in os.listdir(hospital_dir):
@@ -20,9 +23,9 @@ def get_batch_3_dir(hospital):
     return None
 
 
-def backup_batch_3(hospital, batch_dir):
+def backup_batch_3(hospital, batch_dir, backup_dir=None):
     """Sao lưu đợt 3 trước khi làm hỏng"""
-    backup_hosp_dir = os.path.join(BACKUP_DIR, f"hospital_{hospital}")
+    backup_hosp_dir = os.path.join(backup_dir or BACKUP_DIR, f"hospital_{hospital}")
     os.makedirs(backup_hosp_dir, exist_ok=True)
 
     # Chỉ copy các file .csv
@@ -35,8 +38,8 @@ def backup_batch_3(hospital, batch_dir):
                 print(f"Đã backup: {file}")
 
 
-def inject_error(error_type, hospital):
-    batch_dir = get_batch_3_dir(hospital)
+def inject_error(error_type, hospital, raw_dir=None, backup_dir=None):
+    batch_dir = get_batch_3_dir(hospital, raw_dir)
     if not batch_dir:
         print(f"Không tìm thấy đợt 3 của viện {hospital}")
         return
@@ -44,7 +47,7 @@ def inject_error(error_type, hospital):
     print(f"--- Gây lỗi '{error_type}' cho viện {hospital} (đợt 3) ---")
 
     # 1. Backup trước
-    backup_batch_3(hospital, batch_dir)
+    backup_batch_3(hospital, batch_dir, backup_dir)
 
     patient_file = os.path.join(batch_dir, "patient.csv")
     vital_file = os.path.join(batch_dir, "vitalPeriodic.csv")
@@ -85,7 +88,7 @@ def inject_error(error_type, hospital):
         so_dong_hong = max(1, int(so_dong * 0.05))  # 5% số dòng (ít nhất 1 dòng)
 
         # Chọn ngẫu nhiên 5% số dòng
-        hong_indices = df.sample(n=so_dong_hong).index
+        hong_indices = df.sample(n=so_dong_hong, random_state=HAT_GIONG).index
         df.loc[hong_indices, "heartrate"] = 500
         df.to_csv(vital_file, index=False)
         print(f"Đã gán nhịp tim 500 cho {so_dong_hong}/{so_dong} dòng")
@@ -97,7 +100,7 @@ def inject_error(error_type, hospital):
         so_dong_trong = max(1, int(so_dong * 0.5))  # 50%
 
         # Chọn ngẫu nhiên 50% số dòng
-        trong_indices = df.sample(n=so_dong_trong).index
+        trong_indices = df.sample(n=so_dong_trong, random_state=HAT_GIONG).index
         df.loc[trong_indices, "admissionweight"] = pd.NA
         df.to_csv(patient_file, index=False)
         print(f"Đã xóa trắng {so_dong_trong}/{so_dong} dòng admissionweight")
@@ -105,10 +108,10 @@ def inject_error(error_type, hospital):
         print("Lỗi không hợp lệ!")
 
 
-def sua_lai(hospital):
+def sua_lai(hospital, raw_dir=None, backup_dir=None):
     """Khôi phục đợt 3 từ backup"""
-    batch_dir = get_batch_3_dir(hospital)
-    backup_hosp_dir = os.path.join(BACKUP_DIR, f"hospital_{hospital}")
+    batch_dir = get_batch_3_dir(hospital, raw_dir)
+    backup_hosp_dir = os.path.join(backup_dir or BACKUP_DIR, f"hospital_{hospital}")
 
     if not batch_dir or not os.path.isdir(backup_hosp_dir):
         print(f"Không có bản backup hoặc không tìm thấy đợt 3 cho viện {hospital}")
@@ -133,10 +136,10 @@ MAPPING_VIEN = {
 }
 
 
-def gay_loi(error_type):
+def gay_loi(error_type, raw_dir=None, backup_dir=None):
     """Gây lỗi `error_type` cho viện tương ứng (đợt 3). Trả về viện bị gây lỗi."""
     vien = MAPPING_VIEN[error_type]
-    inject_error(error_type, vien)
+    inject_error(error_type, vien, raw_dir, backup_dir)
     return vien
 
 

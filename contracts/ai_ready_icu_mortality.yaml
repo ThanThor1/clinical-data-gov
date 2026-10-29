@@ -1,23 +1,28 @@
 # Hợp đồng dữ liệu: bảng AI-READY cho bài toán dự đoán tử vong ICU
 # Ý nghĩa các trường: xem contracts/raw_patient.yaml
 # Tầng này KHÔNG được chứa cột định danh: patient_id đã được thay bằng patient_hash.
+# tier: ai_ready -> gate1 áp thêm luật quyền riêng tư (governance/privacy.py): có cột định danh
+# hoặc có cột không khai báo ở đây đều bị chặn.
+# v1.1: patient_hash là HMAC-SHA256 (pattern 64 ký tự hex), thêm 2 đặc trưng xét nghiệm.
 
 name: ai_ready_icu_mortality
 description: Dữ liệu sạch, đã giả danh hóa, dùng huấn luyện mô hình dự đoán tử vong ICU
 applies_to:
   - ai_ready_icu_mortality
 owner: Nhóm nghiên cứu AI
-version: "1.0"
+version: "1.1"
 tier: ai_ready
 
 columns:
-  # Mã giả danh (băm SHA-256 của patient_id) -> không còn là dữ liệu nhạy cảm
+  # Mã giả danh (HMAC-SHA256 của patient_id với khóa bí mật) -> không còn là dữ liệu nhạy cảm
   patient_hash:
     type: string
     required: true
     nullable: false
     max_null_pct: 0
+    pattern: "^[0-9a-f]{64}$"
     sensitive: false
+    description: Mã giả danh của bệnh nhân (HMAC-SHA256, không dò ngược được nếu không có khóa)
 
   age:
     type: int
@@ -27,6 +32,7 @@ columns:
     min: 0
     max: 120
     sensitive: false
+    description: Tuổi (người trên 89 tuổi gộp thành 90)
 
   gender:
     type: category
@@ -35,6 +41,7 @@ columns:
     max_null_pct: 30
     allowed_values: [M, F, U]
     sensitive: false
+    description: Giới tính (M / F / U)
 
   weight_kg:
     type: float
@@ -44,6 +51,7 @@ columns:
     min: 20
     max: 400
     sensitive: false
+    description: Cân nặng lúc nhập ICU (kg)
 
   heartrate_mean:
     type: float
@@ -52,6 +60,28 @@ columns:
     min: 20
     max: 300
     sensitive: false
+    description: Nhịp tim trung bình (lần/phút)
+
+  # Đặc trưng xét nghiệm (mg/dL). Không phải bệnh nhân nào cũng làm xét nghiệm nên cho trống tới 60%
+  creatinine_max:
+    type: float
+    required: false
+    nullable: true
+    max_null_pct: 60
+    min: 0
+    max: 30
+    sensitive: false
+    description: Creatinine cao nhất trong thời gian nằm ICU (mg/dL)
+
+  glucose_mean:
+    type: float
+    required: false
+    nullable: true
+    max_null_pct: 60
+    min: 10
+    max: 2000
+    sensitive: false
+    description: Glucose trung bình trong thời gian nằm ICU (mg/dL)
 
   # Nhãn: 1 = tử vong trong ICU (unitdischargestatus == 'Expired'), 0 = sống
   icu_mortality:
@@ -62,3 +92,4 @@ columns:
     min: 0
     max: 1
     sensitive: false
+    description: Nhãn dự đoán - 1 nếu tử vong trong ICU, 0 nếu sống

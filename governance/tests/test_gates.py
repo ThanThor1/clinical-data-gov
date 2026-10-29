@@ -188,8 +188,8 @@ def test_dot_sach_thieu_30_8_phan_tram_can_nang_van_dat(db):
 # Các trường hợp khác
 # ---------------------------------------------------------------------------
 
-def test_loi_o_raw_lab_van_ghi_vi_pham_nhung_khong_anh_huong_ai(db):
-    """raw_lab không chảy vào AI-ready -> vẫn chặn và ghi violation, affected_ai_table để trống."""
+def test_loi_o_raw_lab_anh_huong_ai_qua_dac_trung_xet_nghiem(db, capsys):
+    """labresult -> standardized_labs.lab_value -> creatinine_max / glucose_mean của AI-ready."""
     bang = "raw_lab_hospital_A"
     df = make_hospital("A")["lab"]
     check_gate(bang, df, "gate1", db)
@@ -197,9 +197,22 @@ def test_loi_o_raw_lab_van_ghi_vi_pham_nhung_khong_anh_huong_ai(db):
     assert dat is False
     v = get_violations(db)[0]
     assert (v["error_type"], v["severity"], v["affected_table"]) == ("SCHEMA_COLUMN_REMOVED", "BREAKING", bang)
-    assert v["affected_ai_table"] == ""
+    assert v["affected_ai_table"] == AI
+    assert f"{AI}.creatinine_max" in capsys.readouterr().out
     audit = get_audit_logs(db_path=db)
     assert any(a["ai"] == "governance_gate" and a["bang_nao"] == bang and a["ket_qua"] == "BLOCKED" for a in audit)
+
+
+def test_loi_o_cot_khong_toi_ai_van_ghi_vi_pham(db):
+    """Bảng có hợp đồng nhưng không chảy vào AI-ready -> vẫn chặn, affected_ai_table để trống."""
+    from governance.lineage import record_lineage
+    record_lineage("raw_patient_hospital_Z", "bang_trung_gian_z", {"age": "age"}, db_path=db)
+    df = make_patient("A")
+    check_gate("raw_patient_hospital_Z", df, "gate1", db)
+    dat, _ = check_gate("raw_patient_hospital_Z", df.drop(columns=["age"]), "gate1", db)
+    assert dat is False
+    v = get_violations(db)[0]
+    assert (v["error_type"], v["affected_ai_table"]) == ("SCHEMA_COLUMN_REMOVED", "")
 
 def test_gia_tri_gioi_tinh_sai(db):
     df = make_patient("A")
@@ -250,7 +263,7 @@ def test_cong_sai_bao_loi(db):
         check_gate(BN_B, make_patient("B"), "gate3", db)
 
 
-def test_goi_3_tham_so_nhu_CLAUDE_md(db, monkeypatch):
+def test_goi_3_tham_so_khong_truyen_db(db, monkeypatch):
     """Người 1 gọi check_gate(ten_bang, du_lieu, cong) không truyền db_path."""
     import catalog_access.init_db as init_db
     monkeypatch.setattr(init_db, "DEFAULT_DB_PATH", db)

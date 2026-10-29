@@ -11,7 +11,10 @@ SAVE_DIR = os.path.join(ROOT, "data", "raw")
 HOSPITALS = ["hospital_A", "hospital_B", "hospital_C"]
 
 
-def split_into_timestamps():
+def split_into_timestamps(staging_dir=None, save_root=None):
+    """Chia dữ liệu mỗi viện (staging_dir/hospital_X) thành 3 đợt, ghi vào save_root/hospital_X/<thời điểm>/."""
+    staging_dir = staging_dir or STAGING_DIR
+    save_root = save_root or SAVE_DIR
     print("🚀 Bắt đầu chia dữ liệu thành 3 đợt gửi theo thời gian...")
 
     # Tạo 3 mốc thời gian giả lập (cách nhau 6 tiếng)
@@ -26,8 +29,8 @@ def split_into_timestamps():
 
     for hosp in HOSPITALS:
         print(f"--- Đang xử lý {hosp} ---")
-        hosp_dir = os.path.join(STAGING_DIR, hosp)
-        save_dir = os.path.join(SAVE_DIR, hosp)
+        hosp_dir = os.path.join(staging_dir, hosp)
+        save_dir = os.path.join(save_root, hosp)
 
         # 0. Xóa các đợt cũ của viện (sinh ra từ lần chạy trước, có thể khác ngày)
         #    để data/raw/hospital_X chỉ còn đúng 3 đợt của lần chia này
