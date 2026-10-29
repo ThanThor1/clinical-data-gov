@@ -1,0 +1,38 @@
+# Hai dịch vụ dùng chung một ảnh:
+#   pipeline  : chạy kịch bản demo (hoặc lệnh khác) rồi thoát
+#   dashboard : giao diện Streamlit ở http://localhost:8501
+#
+# Cách dùng (từ gốc repo, đã có data/01_landing/{patient,lab,vitalPeriodic}.csv):
+#   CODE_VERSION=$(git describe --always --dirty) docker compose build
+#   docker compose run --rm pipeline                      # python run_demo.py --reset
+#   docker compose run --rm pipeline python run_eval.py   # đánh giá
+#   docker compose up -d dashboard
+services:
+  pipeline:
+    build:
+      context: .
+      args:
+        CODE_VERSION: ${CODE_VERSION:-dev}
+    image: clinical-data-gov:latest
+    command: ["python", "run_demo.py", "--reset"]
+    volumes:
+      - ./data:/app/data
+      - state:/app/state
+    profiles: ["pipeline"]
+
+  dashboard:
+    image: clinical-data-gov:latest
+    build:
+      context: .
+      args:
+        CODE_VERSION: ${CODE_VERSION:-dev}
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - state:/app/state
+    restart: unless-stopped
+
+volumes:
+  # metadata.db + khóa giả danh + khóa sổ audit, dùng chung cho pipeline và dashboard
+  state:

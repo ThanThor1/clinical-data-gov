@@ -4,11 +4,15 @@
 Mỗi hợp đồng có trường `applies_to` là danh sách tên bảng, cho phép dùng mẫu `*`
 (ví dụ "raw_patient_hospital_*" khớp với raw_patient_hospital_A, _B, _C).
 
+Trường `tier` cho biết hợp đồng thuộc tầng nào; tầng ai_ready có thêm luật quyền riêng tư
+(governance/privacy.py): chỉ được chứa đúng các cột khai báo và không được có cột định danh.
+
 Chạy thử: python -m governance.contracts
 """
 
 import fnmatch
 import os
+import re
 from typing import Optional
 
 import yaml
@@ -27,8 +31,12 @@ MAC_DINH_COT = {
     "min": None,
     "max": None,
     "allowed_values": None,
+    "pattern": None,
     "sensitive": False,
+    "description": "",
 }
+
+CAC_TANG_HOP_LE = {"raw", "standardized", "ai_ready"}
 
 
 def _chuan_hoa_hop_dong(hop_dong: dict, ten_file: str) -> dict:
@@ -40,6 +48,10 @@ def _chuan_hoa_hop_dong(hop_dong: dict, ten_file: str) -> dict:
     # applies_to có thể ghi 1 chuỗi hoặc 1 danh sách -> đưa về danh sách
     if isinstance(hop_dong["applies_to"], str):
         hop_dong["applies_to"] = [hop_dong["applies_to"]]
+    if hop_dong.get("tier") is not None and hop_dong["tier"] not in CAC_TANG_HOP_LE:
+        raise ValueError(f"Hợp đồng '{ten_file}': tầng '{hop_dong['tier']}' không hợp lệ "
+                         f"(chỉ chấp nhận {sorted(CAC_TANG_HOP_LE)})")
+    hop_dong["version"] = str(hop_dong["version"])
 
     cot_da_chuan_hoa = {}
     for ten_cot, luat in (hop_dong["columns"] or {}).items():
@@ -49,6 +61,11 @@ def _chuan_hoa_hop_dong(hop_dong: dict, ten_file: str) -> dict:
                 f"Hợp đồng '{ten_file}', cột '{ten_cot}': kiểu '{luat.get('type')}' không hợp lệ "
                 f"(chỉ chấp nhận {sorted(CAC_KIEU_HOP_LE)})"
             )
+        if luat["pattern"] is not None:
+            try:
+                re.compile(luat["pattern"])
+            except re.error as loi:
+                raise ValueError(f"Hợp đồng '{ten_file}', cột '{ten_cot}': pattern sai ({loi})") from loi
         cot_da_chuan_hoa[ten_cot] = luat
     hop_dong["columns"] = cot_da_chuan_hoa
     hop_dong["file"] = ten_file
@@ -97,6 +114,26 @@ def get_sensitive_columns(hop_dong: dict) -> list[str]:
 def get_required_columns(hop_dong: dict) -> list[str]:
     """Danh sách cột bắt buộc (required: true) của hợp đồng."""
     return [ten for ten, luat in hop_dong["columns"].items() if luat.get("required")]
+
+
+def contract_label(hop_dong: Optional[dict]) -> str:
+    """Nhãn ngắn của hợp đồng để lưu kèm catalog / provenance, ví dụ 'raw_patient v1.0'."""
+    return f"{hop_dong['name']} v{hop_dong['version']}" if hop_dong else ""
+
+
+def catalog_metadata(ten_bang: str, contracts_dir: Optional[str] = None) -> dict:
+    """
+    Thông tin lấy từ hợp đồng để đăng ký catalog (register_dataset(..., **catalog_metadata(ten))):
+    sensitive_columns, description, contract. Bảng chưa có hợp đồng -> các giá trị rỗng.
+    """
+    hop_dong = find_contract(ten_bang, contracts_dir)
+    if hop_dong is None:
+        return {"sensitive_columns": "", "description": "", "contract": ""}
+    return {
+        "sensitive_columns": ",".join(get_sensitive_columns(hop_dong)),
+        "description": str(hop_dong.get("description") or ""),
+        "contract": contract_label(hop_dong),
+    }
 
 
 if __name__ == "__main__":

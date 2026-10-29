@@ -9,12 +9,12 @@ Nhiệm vụ:
   + Tầng dữ liệu nào (tier: 'raw', 'standardized', 'ai_ready')
   + Người/bộ phận phụ trách (owner)
   + Các cột nhạy cảm (sensitive_columns)
+  + Mô tả, hợp đồng áp dụng, vị trí file, số dòng, lần cập nhật cuối
 - Truy vấn và liệt kê các bảng dữ liệu theo tầng hoặc bệnh viện.
 """
 
 import os
 import sys
-import sqlite3
 from typing import Any, Dict, List, Optional
 import pandas as pd
 
@@ -24,8 +24,11 @@ parent_dir = os.path.dirname(current_dir)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-from catalog_access.init_db import get_db_connection, DEFAULT_DB_PATH
+from catalog_access.init_db import get_db_connection, now_str
 from catalog_access.audit import log_event
+
+COT_CATALOG = ("id, name, hospital, tier, owner, sensitive_columns, description, contract, "
+               "file_path, row_count, created_at, updated_at")
 
 
 def register_dataset(
@@ -35,20 +38,30 @@ def register_dataset(
     owner: str,
     sensitive_columns: str = "",
     registered_by: str = "data_steward",
-    db_path: Optional[str] = None
+    db_path: Optional[str] = None,
+    description: str = "",
+    contract: str = "",
+    file_path: str = "",
+    row_count: Optional[int] = None
 ) -> int:
     """
     Đăng ký một bảng dữ liệu vào danh bạ Metadata Catalog theo đúng chuẩn đề tài.
-    
-    Bao gồm 5 thông tin:
+
+    Bao gồm 5 thông tin bắt buộc:
         name (str): Tên định danh của bảng (duy nhất).
         hospital (str): Tên bệnh viện sở hữu nguồn dữ liệu.
         tier (str): Tầng dữ liệu ('raw', 'standardized', 'ai_ready').
         owner (str): Người hoặc nhóm chịu trách nhiệm quản trị bảng.
         sensitive_columns (str): Danh sách các cột nhạy cảm (phân tách bởi dấu phẩy).
+    Thông tin bổ sung (không truyền thì giữ giá trị đã đăng ký trước đó):
+        description (str): Mô tả bảng (thường lấy từ hợp đồng dữ liệu).
+        contract (str): Hợp đồng áp dụng, ví dụ 'raw_patient v1.0'.
+        file_path (str): Vị trí file, tương đối với gốc repo; bảng raw nhiều đợt dùng mẫu '*'.
+        row_count (int): Số dòng hiện tại.
+    Khác:
         registered_by (str): Người thực hiện đăng ký (để ghi audit log).
         db_path (str, optional): Đường dẫn tới metadata.db.
-        
+
     Trả về:
         int: ID của dataset được thêm mới hoặc cập nhật.
     """
@@ -60,16 +73,24 @@ def register_dataset(
     cursor = conn.cursor()
 
     cursor.execute("""
-    INSERT INTO datasets (name, hospital, tier, owner, sensitive_columns)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO datasets (name, hospital, tier, owner, sensitive_columns,
+                          description, contract, file_path, row_count, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(name) DO UPDATE SET
         hospital = excluded.hospital,
         tier = excluded.tier,
         owner = excluded.owner,
-        sensitive_columns = excluded.sensitive_columns;
-    """, (name.strip(), hospital.strip(), tier_clean, owner.strip(), sensitive_columns.strip()))
+        sensitive_columns = excluded.sensitive_columns,
+        description = COALESCE(NULLIF(excluded.description, ''), datasets.description),
+        contract = COALESCE(NULLIF(excluded.contract, ''), datasets.contract),
+        file_path = COALESCE(NULLIF(excluded.file_path, ''), datasets.file_path),
+        row_count = COALESCE(excluded.row_count, datasets.row_count),
+        updated_at = excluded.updated_at;
+    """, (name.strip(), hospital.strip(), tier_clean, owner.strip(), sensitive_columns.strip(),
+          description.strip(), contract.strip(), file_path.strip(), row_count, now_str()))
 
-    dataset_id = cursor.lastrowid
+    # lastrowid không đáng tin khi câu lệnh rơi vào nhánh UPDATE -> tra lại id theo tên
+    dataset_id = cursor.execute("SELECT id FROM datasets WHERE name = ?;", (name.strip(),)).fetchone()["id"]
     conn.commit()
     conn.close()
 
@@ -96,7 +117,7 @@ def list_datasets(
     Có thể lọc theo tầng dữ liệu hoặc theo bệnh viện.
     """
     conn = get_db_connection(db_path)
-    query = "SELECT id, name, hospital, tier, owner, sensitive_columns, created_at FROM datasets WHERE 1=1"
+    query = f"SELECT {COT_CATALOG} FROM datasets WHERE 1=1"
     params: List[Any] = []
 
     if tier:
@@ -127,10 +148,7 @@ def get_dataset(name: str, db_path: Optional[str] = None) -> Optional[Dict[str, 
     """
     conn = get_db_connection(db_path)
     cursor = conn.cursor()
-    cursor.execute("""
-    SELECT id, name, hospital, tier, owner, sensitive_columns, created_at
-    FROM datasets WHERE name = ?;
-    """, (name.strip(),))
+    cursor.execute(f"SELECT {COT_CATALOG} FROM datasets WHERE name = ?;", (name.strip(),))
     row = cursor.fetchone()
     conn.close()
     if row:

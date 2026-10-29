@@ -4,7 +4,8 @@ Bộ phát hiện vi phạm (Violation Engine) - phần cốt lõi của governa
 Khi một cổng kiểm tra (gates.py) tìm ra lỗi, nó gọi report_violation(...). Hàm này:
   1. Suy ra bệnh viện từ tên bảng (raw_patient_hospital_B -> "Bệnh viện B").
   2. Dùng lineage tìm MỌI bảng AI-ready bị ảnh hưởng (theo cột nếu có, không thì theo bảng).
-  3. Ghi một dòng vào bảng `violations` (dashboard tô đỏ nếu BREAKING, vàng nếu WARNING).
+  3. Ghi một dòng vào bảng `violations` (dashboard tô đỏ nếu BREAKING, vàng nếu WARNING),
+     kèm run_id và lô dữ liệu đang xử lý (lấy từ ngữ cảnh của governance/provenance.py).
   4. Ghi audit: log_event("violation_engine", error_type, table, "BLOCKED" | "SUCCESS").
   5. In ra màn hình các bảng AI-ready bị ảnh hưởng.
 
@@ -14,8 +15,8 @@ Chạy thử: python -m governance.violation_engine   (in thống kê vi phạm 
 import re
 from typing import Optional
 
-from catalog_access import log_event
-from catalog_access.init_db import get_db_connection
+from catalog_access import get_audit_context, log_event
+from catalog_access.init_db import get_db_connection, now_str
 from governance.lineage import get_affected_ai_tables, get_impact_paths
 
 # Các loại lỗi governance và ý nghĩa
@@ -28,6 +29,9 @@ LOAI_LOI = {
     "COMPLETENESS": "Kahn - Đầy đủ: quá nhiều ô trống",
     "CONFORMANCE": "Kahn - Tuân thủ: sai định dạng hoặc giá trị không cho phép",
     "PLAUSIBILITY": "Kahn - Hợp lý: giá trị nằm ngoài khoảng hợp lý",
+    "PRIVACY_SENSITIVE_COLUMN": "Tầng AI-ready chứa cột định danh bệnh nhân",
+    "PRIVACY_UNDECLARED_COLUMN": "Tầng AI-ready chứa cột không khai báo trong hợp đồng",
+    "PROVENANCE_UNVERIFIED": "File đầu vào không khớp checksum với phiên bản nào do pipeline tạo ra",
 }
 
 MUC_DO_HOP_LE = {"CRITICAL", "BREAKING", "WARNING", "INFO"}
@@ -65,12 +69,14 @@ def report_violation(error_type: str, severity: str, table: str, details: str,
     duong_di = get_impact_paths(table, column, db_path)
     hanh_dong = "đã chặn" if blocked else "cảnh báo"
     chi_tiet = f"[Cột: {column}] {details}" if column else details
+    ngu_canh = get_audit_context()
 
     conn = get_db_connection(db_path)
     con_tro = conn.execute(
-        "INSERT INTO violations (error_type, severity, hospital, affected_table, "
-        "affected_ai_table, action, details) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (error_type, severity, benh_vien, table, ",".join(bang_ai), hanh_dong, chi_tiet),
+        "INSERT INTO violations (error_type, severity, hospital, affected_table, affected_ai_table, "
+        "action, details, timestamp, run_id, batch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (error_type, severity, benh_vien, table, ",".join(bang_ai), hanh_dong, chi_tiet,
+         now_str(), ngu_canh["run_id"], ngu_canh["batch"]),
     )
     ma_vi_pham = con_tro.lastrowid
     conn.commit()
@@ -81,7 +87,8 @@ def report_violation(error_type: str, severity: str, table: str, details: str,
 
     # In ra màn hình cho người vận hành
     bieu_tuong = "⛔" if blocked else "⚠️ "
-    print(f"{bieu_tuong} [{severity}] {error_type} tại {table} ({benh_vien}) - {hanh_dong}")
+    lo = f" | lô {ngu_canh['batch']}" if ngu_canh["batch"] else ""
+    print(f"{bieu_tuong} [{severity}] {error_type} tại {table} ({benh_vien}){lo} - {hanh_dong}")
     print(f"     {chi_tiet}")
     if bang_ai:
         print(f"     Bảng AI-ready bị ảnh hưởng: {', '.join(bang_ai)}")
@@ -102,12 +109,15 @@ def report_violation(error_type: str, severity: str, table: str, details: str,
         "impact_paths": duong_di,
         "action": hanh_dong,
         "details": chi_tiet,
+        "run_id": ngu_canh["run_id"],
+        "batch": ngu_canh["batch"],
     }
 
 
 def get_violations(db_path: Optional[str] = None, severity: Optional[str] = None,
-                   table: Optional[str] = None, since_id: int = 0) -> list[dict]:
-    """Đọc danh sách vi phạm (mới nhất trước), có thể lọc theo mức độ, bảng, hoặc id > since_id."""
+                   table: Optional[str] = None, since_id: int = 0,
+                   run_id: Optional[str] = None) -> list[dict]:
+    """Đọc danh sách vi phạm (mới nhất trước), lọc theo mức độ, bảng, lần chạy, hoặc id > since_id."""
     cau_lenh = "SELECT * FROM violations WHERE id > ?"
     tham_so: list = [since_id]
     if severity:
@@ -116,6 +126,9 @@ def get_violations(db_path: Optional[str] = None, severity: Optional[str] = None
     if table:
         cau_lenh += " AND affected_table = ?"
         tham_so.append(table)
+    if run_id:
+        cau_lenh += " AND run_id = ?"
+        tham_so.append(run_id)
     conn = get_db_connection(db_path)
     dong = conn.execute(cau_lenh + " ORDER BY id DESC", tham_so).fetchall()
     conn.close()

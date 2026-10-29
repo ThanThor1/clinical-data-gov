@@ -15,6 +15,7 @@ columns:
     required: false
     nullable: false
     sensitive: false
+    description: Mã dòng xét nghiệm
 
   patientunitstayid:
     type: int
@@ -22,6 +23,7 @@ columns:
     nullable: false
     max_null_pct: 0
     sensitive: true
+    description: Mã lượt nằm ICU của bệnh nhân (định danh)
 
   # Thời điểm có kết quả, tính bằng phút so với lúc nhập ICU (có thể âm)
   labresultoffset:
@@ -30,6 +32,7 @@ columns:
     nullable: false
     max_null_pct: 0
     sensitive: false
+    description: Thời điểm có kết quả, số phút tính từ lúc nhập ICU
 
   labname:
     type: string
@@ -37,6 +40,7 @@ columns:
     nullable: true
     max_null_pct: 30
     sensitive: false
+    description: Tên xét nghiệm (creatinine, glucose, ...)
 
   # Mỗi loại xét nghiệm có thang đo khác nhau nên không đặt min/max chung
   labresult:
@@ -45,3 +49,4 @@ columns:
     nullable: true
     max_null_pct: 30
     sensitive: false
+    description: Kết quả xét nghiệm (đơn vị tùy loại xét nghiệm)

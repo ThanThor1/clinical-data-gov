@@ -1,7 +1,7 @@
 """
 Demo phần Governance (chạy độc lập với pipeline của Người 1).
 
-Kịch bản (CLAUDE.md mục 8):
+Kịch bản (tài liệu phân công mục 8):
   1. Dữ liệu sạch của 3 bệnh viện đi qua gate1 + gate2 ở cả 3 tầng -> không có lỗi BREAKING.
   2. Bệnh viện B đổi tên cột admissionweight -> weight.
   3. Hệ thống phát hiện, chặn, ghi violations (BREAKING), chỉ ra ai_ready_icu_mortality bị ảnh hưởng.

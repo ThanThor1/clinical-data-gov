@@ -10,16 +10,17 @@ Người 1 gọi check_gate(ten_bang, df, "gate1" | "gate2")
    ├─ gate1 (schema + hợp đồng)
    │    ├─ schema_registry.register_schema()   lưu schema_versions, so với phiên bản HỢP LỆ gần nhất
    │    │                                      → COLUMN_RENAMED / REMOVED / TYPE_CHANGED / ADDED
-   │    └─ đối chiếu hợp đồng                  cột bắt buộc có mặt? đúng kiểu?
+   │    ├─ đối chiếu hợp đồng                  cột bắt buộc có mặt? đúng kiểu?
+   │    └─ privacy.check_privacy()             (chỉ tầng ai_ready) có cột định danh? cột ngoài hợp đồng?
    ├─ gate2 (chất lượng – khung Kahn)
-   │    ├─ Conformance   đúng kiểu số, giá trị thuộc allowed_values
+   │    ├─ Conformance   đúng kiểu số, giá trị thuộc allowed_values, khớp pattern
    │    ├─ Completeness  % ô trống <= max_null_pct, cột nullable:false không trống
    │    └─ Plausibility  giá trị trong [min, max]
    │
    ├─ mỗi lỗi BREAKING/WARNING → violation_engine.report_violation()
    │    ├─ suy ra bệnh viện từ tên bảng (…_hospital_B → "Bệnh viện B")
    │    ├─ lineage.get_affected_ai_tables(bảng, cột)  → bảng AI-ready bị ảnh hưởng
-   │    ├─ INSERT violations (action "đã chặn" / "cảnh báo")
+   │    ├─ INSERT violations (action "đã chặn" / "cảnh báo", kèm run_id và lô đang xử lý)
    │    └─ log_event("violation_engine", loại_lỗi, bảng, BLOCKED | SUCCESS)
    │
    └─ log_event("governance_gate", cong, bảng, BLOCKED | SUCCESS)  → trả về (đạt?, [lỗi])
@@ -41,6 +42,9 @@ Một lô lỗi bị chặn được lưu lại (is_breaking = 1) nhưng **khôn
 | `CONFORMANCE` | sai định dạng số / giá trị ngoài `allowed_values` | BREAKING nếu > 1% dòng, không thì WARNING |
 | `PLAUSIBILITY` | giá trị ngoài `[min, max]` | BREAKING nếu > 1% dòng, không thì WARNING |
 | `NO_CONTRACT` | bảng chưa có hợp đồng | WARNING (vẫn đạt) |
+| `PRIVACY_SENSITIVE_COLUMN` | bảng tầng ai_ready có cột định danh (cột `sensitive: true` ở bất kỳ hợp đồng nào) | BREAKING |
+| `PRIVACY_UNDECLARED_COLUMN` | bảng tầng ai_ready có cột không khai báo trong hợp đồng | BREAKING |
+| `PROVENANCE_UNVERIFIED` | file đầu vào không khớp checksum với phiên bản nào pipeline đã ghi (`provenance.verify_input`) | BREAKING |
 
 `check_gate` trả `False` khi có ít nhất một lỗi BREAKING. Thêm cột mới chỉ là INFO (không ghi violations).
 
@@ -73,11 +77,12 @@ mỗi lô chỉ gọi **một trong hai** hàm vì cả hai đều ghi schema/vi
 ## 4. Chạy
 
 ```bash
-pytest governance/tests -q                       # 59 test (2 test dùng dữ liệu thật, tự skip nếu thiếu)
+pytest governance/tests -q                       # 2 test dùng dữ liệu thật, tự skip nếu thiếu
 python -m governance.demo_governance --reset     # demo, ghi vào metadata.db cho dashboard
 python -m governance.demo_governance --fake --db /tmp/x.db   # demo bằng dữ liệu giả
 python -m governance.violation_engine            # thống kê vi phạm trong metadata.db
 ```
 
-Module: `contracts.py` (đọc YAML) · `schema_registry.py` · `lineage.py` · `violation_engine.py` ·
-`gates.py` · `sample_data.py` (dữ liệu giả + chuẩn hóa mẫu cho demo) · `demo_governance.py`.
+Module: `contracts.py` (đọc YAML) · `schema_registry.py` · `lineage.py` · `provenance.py` (lần chạy, lô,
+phiên bản, checksum) · `privacy.py` (giả danh HMAC, luật tầng AI-ready) · `violation_engine.py` · `gates.py` ·
+`sample_data.py` (dữ liệu giả + chuẩn hóa mẫu cho demo) · `demo_governance.py`.

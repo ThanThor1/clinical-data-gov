@@ -1,12 +1,13 @@
 # Hợp đồng dữ liệu: bảng bệnh nhân CHUẨN HÓA (mọi bệnh viện cùng một khuôn)
 # Ý nghĩa các trường: xem contracts/raw_patient.yaml
+# v1.1: thêm source_batch (mỗi dòng biết mình đến từ đợt gửi nào -> provenance mức dòng)
 
 name: standardized_patients
 description: Bệnh nhân của cả 3 bệnh viện sau khi chuẩn hóa tên cột, kiểu và đơn vị
 applies_to:
   - standardized_patients
 owner: Nhóm Kỹ thuật dữ liệu (Người 1)
-version: "1.0"
+version: "1.1"
 tier: standardized
 
 columns:
@@ -16,6 +17,7 @@ columns:
     nullable: false
     max_null_pct: 0
     sensitive: true
+    description: Mã bệnh nhân (từ patientunitstayid, định danh)
 
   # "> 89" ở tầng raw được chuẩn hóa thành số nguyên (ví dụ 90)
   age:
@@ -26,6 +28,7 @@ columns:
     min: 0
     max: 120
     sensitive: false
+    description: Tuổi (số nguyên, "> 89" đổi thành 90)
 
   # Male -> M, Female -> F, còn lại -> U
   gender:
@@ -35,6 +38,7 @@ columns:
     max_null_pct: 30
     allowed_values: [M, F, U]
     sensitive: false
+    description: Giới tính (M / F / U)
 
   weight_kg:
     type: float
@@ -44,6 +48,7 @@ columns:
     min: 20
     max: 400
     sensitive: false
+    description: Cân nặng lúc nhập ICU (kg)
 
   source_hospital:
     type: string
@@ -51,6 +56,15 @@ columns:
     nullable: false
     max_null_pct: 0
     sensitive: false
+    description: Bệnh viện gửi dữ liệu
+
+  source_batch:
+    type: string
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: false
+    description: Đợt gửi chứa dòng này (hospital_X/<thời điểm gửi>), tra chi tiết trong batch_ingestions
 
   # Nhịp tim trung bình của bệnh nhân, tính từ raw_vital (không bắt buộc: viện B không có vital)
   heartrate_mean:
@@ -60,6 +74,7 @@ columns:
     min: 20
     max: 300
     sensitive: false
+    description: Nhịp tim trung bình trong thời gian nằm ICU (lần/phút)
 
   unitdischargestatus:
     type: category
@@ -67,3 +82,4 @@ columns:
     nullable: true
     allowed_values: [Alive, Expired]
     sensitive: false
+    description: Tình trạng lúc ra khỏi ICU (Alive / Expired)

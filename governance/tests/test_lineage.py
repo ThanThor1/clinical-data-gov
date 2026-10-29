@@ -24,7 +24,7 @@ def test_ghi_lineage_khong_trung(db_path):
     assert canh[0]["transformation"] == "direct"
 
 
-def test_goi_dung_3_tham_so_nhu_CLAUDE_md(db_path, monkeypatch):
+def test_goi_dung_3_tham_so_khong_truyen_db(db_path, monkeypatch):
     """Người 1 gọi record_lineage(nguon, dich, anh_xa_cot) không truyền db_path."""
     import catalog_access.init_db as init_db
     monkeypatch.setattr(init_db, "DEFAULT_DB_PATH", db_path)
@@ -51,15 +51,27 @@ def test_bang_raw_patient_va_vital_noi_toi_ai_ready(db_path):
             AI, "standardized_patients"]
 
 
-def test_bang_raw_lab_chi_toi_standardized_labs(db_path):
-    """AI-ready chưa có cột lab -> raw_lab chỉ chảy tới standardized_labs, không tới AI-ready."""
+def test_bang_raw_lab_toi_ai_ready_qua_standardized_labs(db_path):
+    """AI-ready ghép từ 2 bảng standardized: raw_lab -> standardized_labs -> đặc trưng xét nghiệm."""
     record_sample_lineage(db_path)
-    assert not any(c["source_table"] == "standardized_labs" for c in get_lineage_edges(db_path))
     for vien in "ABC":
         bang = f"raw_lab_hospital_{vien}"
-        assert get_downstream_tables(bang, db_path=db_path) == ["standardized_labs"]
-        assert get_affected_ai_tables(bang, db_path=db_path) == []
-        assert get_affected_ai_tables(bang, "labresult", db_path) == []
+        assert get_downstream_tables(bang, db_path=db_path) == [AI, "standardized_labs"]
+        assert get_affected_ai_tables(bang, "labresult", db_path) == [AI]
+        duong = get_impact_paths(bang, "labresult", db_path)
+        assert duong == [f"{bang}.labresult -> standardized_labs.lab_value -> {AI}.creatinine_max",
+                         f"{bang}.labresult -> standardized_labs.lab_value -> {AI}.glucose_mean"]
+    g = build_graph(db_path)
+    assert g.has_edge("standardized_labs", AI) and g.has_edge("standardized_patients", AI)
+
+
+def test_ghi_lai_lineage_cap_nhat_mo_ta_bien_doi(db_path):
+    record_lineage("standardized_patients", AI, {"patient_id": "patient_hash"}, "giả danh hóa SHA-256",
+                   db_path=db_path)
+    record_lineage("standardized_patients", AI, {"patient_id": "patient_hash"}, "giả danh hóa HMAC-SHA256",
+                   db_path=db_path)
+    canh = get_lineage_edges(db_path)
+    assert len(canh) == 1 and canh[0]["transformation"] == "giả danh hóa HMAC-SHA256"
 
 
 def test_du_duong_di_muc_cot_cho_ca_3_vien(db_path):

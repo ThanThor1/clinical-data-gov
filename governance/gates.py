@@ -4,8 +4,10 @@ Cổng kiểm tra dữ liệu (quality gates). Dữ liệu chỉ được lên t
     gate1 - Schema + hợp đồng:
         * ghi schema vào schema_registry, phát hiện đổi tên / xóa / đổi kiểu cột
         * cột bắt buộc phải có mặt, kiểu dữ liệu phải đúng hợp đồng
+        * bảng tầng ai_ready: luật quyền riêng tư (governance/privacy.py) - không cột định danh,
+          không cột ngoài hợp đồng
     gate2 - Chất lượng theo khung Kahn:
-        * Conformance  (tuân thủ) : đúng kiểu số, giá trị thuộc allowed_values
+        * Conformance  (tuân thủ) : đúng kiểu số, giá trị thuộc allowed_values, khớp pattern
         * Completeness (đầy đủ)   : không vượt max_null_pct, cột nullable: false không có ô trống
         * Plausibility (hợp lý)   : giá trị trong [min, max]
 
@@ -14,20 +16,22 @@ Mức độ:
     WARNING  -> cho qua nhưng ghi lại vào violations
     INFO     -> chỉ để biết (ví dụ thêm cột mới), không ghi violations
 
-Ngưỡng 1% (CLAUDE.md mục 7): lỗi giá trị (sai định dạng / ngoài khoảng) chỉ BREAKING khi
+Ngưỡng 1% (tài liệu phân công mục 7): lỗi giá trị (sai định dạng / ngoài khoảng) chỉ BREAKING khi
 > 1% số dòng bị lỗi; ít hơn thì WARNING.
 
-Hàm dùng chung (CLAUDE.md mục 4): check_gate(ten_bang, du_lieu, cong) -> (dat, danh_sach_loi)
+Hàm dùng chung (tài liệu phân công mục 4): check_gate(ten_bang, du_lieu, cong) -> (dat, danh_sach_loi)
 
 Chạy thử: python -m governance.gates
 """
 
+import re
 from typing import Optional
 
 import pandas as pd
 
 from catalog_access import log_event
 from governance.contracts import find_contract
+from governance.privacy import check_privacy
 from governance.schema_registry import logical_type, register_schema, set_schema_breaking
 from governance.violation_engine import report_violation
 
@@ -168,7 +172,13 @@ def _gate1(ten_bang: str, df: pd.DataFrame, hop_dong: Optional[dict],
                 f"Cột '{cot}' có kiểu {kieu_thuc}, hợp đồng yêu cầu {luat['type']}",
                 observed=kieu_thuc, expected=luat["type"]))
 
-    # 3. Đánh dấu phiên bản schema vừa ghi là gây hỏng hay không (theo kết luận của gate)
+    # 3. Tầng AI-ready: luật quyền riêng tư (cột định danh / cột ngoài hợp đồng -> chặn)
+    for loi in check_privacy(ten_bang, df, hop_dong):
+        van_de.append(_van_de(f"privacy.{loi['error_type'].lower()}", loi["error_type"], "BREAKING",
+                              loi["column"], loi["message"], observed=loi["observed"],
+                              expected=loi["expected"]))
+
+    # 4. Đánh dấu phiên bản schema vừa ghi là gây hỏng hay không (theo kết luận của gate)
     if ghi_nhan and dang_ky["is_new_version"]:
         co_chan = any(v["severity"] == "BREAKING" for v in van_de)
         set_schema_breaking(ten_bang, dang_ky["version"], co_chan, db_path)
@@ -231,6 +241,16 @@ def _gate2(ten_bang: str, df: pd.DataFrame, hop_dong: Optional[dict]) -> list[di
                                    f"trong [{luat['min']}, {luat['max']}]", list(so_hop_le[ngoai]))
                 if loi:
                     van_de.append(loi)
+
+        # --- Conformance: khớp mẫu (ví dụ patient_hash phải là 64 ký tự hex) ---
+        if luat["pattern"]:
+            mau = re.compile(luat["pattern"])
+            sai = ~co_gia_tri.map(lambda x: bool(mau.fullmatch(str(x).strip())))
+            loi = _theo_nguong(int(sai.sum()), tong, "conformance.pattern", "CONFORMANCE",
+                               cot, f"không khớp mẫu {luat['pattern']}", f"khớp {luat['pattern']}",
+                               list(co_gia_tri[sai].unique()))
+            if loi:
+                van_de.append(loi)
 
         # --- Conformance: giá trị cho phép ---
         if luat["allowed_values"]:

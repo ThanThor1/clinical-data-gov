@@ -13,7 +13,7 @@ networkx>=3.0
 # SQLite có sẵn trong Python, không cần cài
 
 # ===== Dashboard =====
-streamlit>=1.30.0
+streamlit>=1.50.0
 plotly>=5.18.0
 matplotlib>=3.7.0
 graphviz>=0.20.0

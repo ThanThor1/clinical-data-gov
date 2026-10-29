@@ -1,12 +1,13 @@
 # Hợp đồng dữ liệu: bảng xét nghiệm CHUẨN HÓA
 # Ý nghĩa các trường: xem contracts/raw_patient.yaml
+# v1.1: thêm source_batch
 
 name: standardized_labs
 description: Kết quả xét nghiệm của cả 3 bệnh viện sau khi chuẩn hóa
 applies_to:
   - standardized_labs
 owner: Nhóm Kỹ thuật dữ liệu (Người 1)
-version: "1.0"
+version: "1.1"
 tier: standardized
 
 columns:
@@ -16,6 +17,7 @@ columns:
     nullable: false
     max_null_pct: 0
     sensitive: true
+    description: Mã bệnh nhân (định danh)
 
   lab_name:
     type: string
@@ -23,6 +25,7 @@ columns:
     nullable: true
     max_null_pct: 30
     sensitive: false
+    description: Tên xét nghiệm
 
   lab_value:
     type: float
@@ -30,6 +33,7 @@ columns:
     nullable: true
     max_null_pct: 30
     sensitive: false
+    description: Kết quả xét nghiệm
 
   source_hospital:
     type: string
@@ -37,3 +41,12 @@ columns:
     nullable: false
     max_null_pct: 0
     sensitive: false
+    description: Bệnh viện gửi dữ liệu
+
+  source_batch:
+    type: string
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: false
+    description: Đợt gửi chứa dòng này (hospital_X/<thời điểm gửi>)

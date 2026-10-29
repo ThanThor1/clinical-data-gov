@@ -1,7 +1,7 @@
 """
 Sinh dữ liệu GIẢ mô phỏng eICU để test và demo khi chưa có dữ liệu thật.
 
-Dữ liệu giả cố ý giống đặc điểm dữ liệu thật (CLAUDE.md mục 7):
+Dữ liệu giả cố ý giống đặc điểm dữ liệu thật (tài liệu phân công mục 7):
 - age là chuỗi, có "> 89" và có ô rỗng; gender là Male/Female (có ô rỗng)
 - admissionweight thiếu khoảng 20%
 - Bệnh viện B KHÔNG có dòng vitalPeriodic nào (bảng rỗng nhưng vẫn có tên cột)
@@ -11,10 +11,10 @@ Ngoài ra có vài hàm "chuẩn hóa" đơn giản (thay cho pipeline của Ng�
 có đủ 3 tầng raw -> standardized -> ai_ready.
 """
 
-import hashlib
-
 import numpy as np
 import pandas as pd
+
+from governance.privacy import pseudonymize_series
 
 # Mã hospitalid thật của 3 bệnh viện được chọn và số bệnh nhân
 THONG_TIN_VIEN = {
@@ -26,7 +26,16 @@ THONG_TIN_VIEN = {
 COT_VITAL = ["vitalperiodicid", "patientunitstayid", "observationoffset",
              "temperature", "sao2", "heartrate", "respiration"]
 
-TEN_XET_NGHIEM = ["glucose", "lactate", "creatinine", "potassium", "sodium", "Hgb"]
+# Tên xét nghiệm -> (trung bình, độ lệch chuẩn, nhỏ nhất, lớn nhất), đơn vị như eICU (mg/dL, mmol/L, g/dL)
+XET_NGHIEM = {
+    "glucose": (140, 45, 40, 600),
+    "lactate": (2.0, 1.2, 0.3, 15),
+    "creatinine": (1.2, 0.6, 0.3, 10),
+    "potassium": (4.1, 0.5, 2.5, 6.5),
+    "sodium": (139, 4, 120, 160),
+    "Hgb": (11, 2, 6, 17),
+}
+TEN_XET_NGHIEM = list(XET_NGHIEM)
 
 
 def _ma_benh_nhan(vien: str, n: int) -> list[int]:
@@ -48,8 +57,8 @@ def make_patient(vien: str, seed: int = 0) -> pd.DataFrame:
     gioi[2] = None                          # có ô giới tính rỗng
 
     can_nang = rng.normal(80, 18, n).clip(40, 180).round(1)
-    so_o_thieu = int(n * 0.2)               # thiếu khoảng 20% cân nặng như dữ liệu thật
-    can_nang[rng.choice(n, so_o_thieu, replace=False)] = np.nan
+    # Thiếu khoảng 20% cân nặng như dữ liệu thật, rải đều để đợt nào cũng dưới ngưỡng 40% của hợp đồng
+    can_nang[::5] = np.nan
 
     trang_thai = ["Alive"] * n
     trang_thai[-1] = "Expired"              # có ít nhất 1 ca tử vong
@@ -72,12 +81,14 @@ def make_lab(vien: str, so_dong_moi_bn: int = 5, seed: int = 0) -> pd.DataFrame:
     rng = np.random.default_rng(seed + ord(vien) + 1)
     ma_bn = np.repeat(_ma_benh_nhan(vien, THONG_TIN_VIEN[vien]["so_benh_nhan"]), so_dong_moi_bn)
     n = len(ma_bn)
+    ten = rng.choice(TEN_XET_NGHIEM, n)
+    tb, lech, thap, cao = (np.array([XET_NGHIEM[t][i] for t in ten]) for i in range(4))
     return pd.DataFrame({
         "labid": np.arange(n) + 1,
         "patientunitstayid": ma_bn,
         "labresultoffset": rng.integers(-300, 3000, n),
-        "labname": rng.choice(TEN_XET_NGHIEM, n),
-        "labresult": rng.normal(50, 20, n).round(2),
+        "labname": ten,
+        "labresult": rng.normal(tb, lech).clip(thap, cao).round(2),
         "labmeasurenamesystem": "mg/dL",
     })
 
@@ -123,7 +134,7 @@ def _tuoi_so(gia_tri) -> float:
     return float(gia_tri) if gia_tri else np.nan
 
 
-def standardize_patients(raw: dict[str, dict[str, pd.DataFrame]]) -> pd.DataFrame:
+def standardize_patients(raw: dict[str, dict[str, pd.DataFrame]], dot: str = "dot_mau") -> pd.DataFrame:
     """Ghép bảng patient của các viện thành standardized_patients (đúng tên cột chuẩn)."""
     phan = []
     for vien, bang in raw.items():
@@ -134,6 +145,7 @@ def standardize_patients(raw: dict[str, dict[str, pd.DataFrame]]) -> pd.DataFram
             "gender": p["gender"].map({"Male": "M", "Female": "F"}).fillna("U"),
             "weight_kg": pd.to_numeric(p["admissionweight"], errors="coerce"),
             "source_hospital": f"Bệnh viện {vien}",
+            "source_batch": f"hospital_{vien}/{dot}",
             "unitdischargestatus": p["unitdischargestatus"],
         })
         # Nhịp tim trung bình mỗi bệnh nhân (viện B không có vital -> NaN)
@@ -147,7 +159,7 @@ def standardize_patients(raw: dict[str, dict[str, pd.DataFrame]]) -> pd.DataFram
     return pd.concat(phan, ignore_index=True)
 
 
-def standardize_labs(raw: dict[str, dict[str, pd.DataFrame]]) -> pd.DataFrame:
+def standardize_labs(raw: dict[str, dict[str, pd.DataFrame]], dot: str = "dot_mau") -> pd.DataFrame:
     """Ghép bảng lab của các viện thành standardized_labs."""
     phan = []
     for vien, bang in raw.items():
@@ -157,15 +169,15 @@ def standardize_labs(raw: dict[str, dict[str, pd.DataFrame]]) -> pd.DataFrame:
             "lab_name": lab["labname"],
             "lab_value": pd.to_numeric(lab["labresult"], errors="coerce"),
             "source_hospital": f"Bệnh viện {vien}",
+            "source_batch": f"hospital_{vien}/{dot}",
         }))
     return pd.concat(phan, ignore_index=True)
 
 
 def build_ai_ready(std_patients: pd.DataFrame) -> pd.DataFrame:
-    """Tạo ai_ready_icu_mortality: giả danh hóa patient_id và tạo nhãn tử vong 0/1."""
+    """Tạo ai_ready_icu_mortality: giả danh hóa patient_id (HMAC-SHA256) và tạo nhãn tử vong 0/1."""
     return pd.DataFrame({
-        "patient_hash": std_patients["patient_id"].map(
-            lambda x: hashlib.sha256(str(x).encode()).hexdigest()[:16]),
+        "patient_hash": pseudonymize_series(std_patients["patient_id"]),
         "age": std_patients["age"],
         "gender": std_patients["gender"],
         "weight_kg": std_patients["weight_kg"],

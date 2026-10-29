@@ -1,5 +1,12 @@
 # Cấu hình chính sách phân quyền truy cập theo vai trò (RBAC)
 # Quản lý bởi: Người 3 (Catalog, Phân quyền, Audit & Báo cáo)
+#
+# Ý nghĩa các trường của một vai trò:
+#   allowed_tiers      : các tầng được truy cập (raw, standardized, ai_ready) + catalog (xem danh bạ)
+#   can_read/can_write : được đọc / ghi dữ liệu ở các tầng trên
+#   can_view_sensitive : được xem cột nhạy cảm (sensitive: true trong hợp đồng); false -> cột bị ẩn khi đọc
+#   can_view_audit     : được xem sổ audit_log trên dashboard
+# Người dùng không có trong danh sách users -> default_role (mặc định từ chối mọi tầng dữ liệu).
 
 roles:
   # 1. Kỹ sư dữ liệu (Data Engineer): Có toàn quyền truy cập để vận hành pipeline dữ liệu
@@ -12,9 +19,24 @@ roles:
       - catalog
     can_read: true
     can_write: true
+    can_view_sensitive: true
+    can_view_audit: true
     description: "Toàn quyền đọc/ghi mọi tầng dữ liệu và cấu hình hệ thống"
 
-  # 2. Nhà nghiên cứu (Researcher): Chỉ được phép đọc tầng AI-ready (đã ẩn danh & kiểm định)
+  # 2. Chuyên viên phân tích (Analyst): Đọc được tầng chuẩn hóa nhưng KHÔNG thấy cột định danh
+  analyst:
+    display_name: "Chuyên viên phân tích"
+    allowed_tiers:
+      - standardized
+      - ai_ready
+      - catalog
+    can_read: true
+    can_write: false
+    can_view_sensitive: false
+    can_view_audit: false
+    description: "Đọc tầng standardized và AI-ready; cột nhạy cảm (patient_id, ...) bị ẩn khi đọc"
+
+  # 3. Nhà nghiên cứu (Researcher): Chỉ được phép đọc tầng AI-ready (đã ẩn danh & kiểm định)
   researcher:
     display_name: "Nhà nghiên cứu"
     allowed_tiers:
@@ -22,15 +44,19 @@ roles:
       - catalog
     can_read: true
     can_write: false
+    can_view_sensitive: false
+    can_view_audit: false
     description: "Chỉ được phép đọc tầng AI-ready đã ẩn danh; tuyệt đối cấm dữ liệu thô và nhạy cảm"
 
-  # 3. Khách (Guest / Viewer): Chỉ được xem danh bạ bảng dữ liệu
+  # 4. Khách (Guest / Viewer): Chỉ được xem danh bạ bảng dữ liệu
   guest:
     display_name: "Khách xem"
     allowed_tiers:
       - catalog
     can_read: false
     can_write: false
+    can_view_sensitive: false
+    can_view_audit: false
     description: "Chỉ được tra cứu metadata catalog, không được đọc dữ liệu chi tiết của các tầng"
 
 # Danh sách người dùng được gán vai trò mẫu (Users Mapping)
@@ -38,6 +64,11 @@ users:
   engineer_alice: data_engineer
   engineer_1: data_engineer
   ky_su_du_lieu: data_engineer
+  # Tài khoản dịch vụ mà pipeline dùng để đọc raw và ghi standardized / AI-ready
+  pipeline_service: data_engineer
+
+  analyst_dave: analyst
+  chuyen_vien_phan_tich: analyst
 
   researcher_bob: researcher
   researcher_1: researcher

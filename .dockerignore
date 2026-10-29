@@ -1,0 +1,10 @@
+.git
+.venv
+.idea
+.pytest_cache
+.ipynb_checkpoints
+__pycache__/
+*.pyc
+*.db
+.secrets/
+data/

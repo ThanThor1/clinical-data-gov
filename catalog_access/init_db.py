@@ -3,24 +3,101 @@ Module khởi tạo cơ sở dữ liệu siêu dữ liệu dùng chung (metadata
 Phụ trách bởi: Người 3 (Quản lý, Catalog, Phân quyền, Audit & Báo cáo)
 
 Nhiệm vụ:
-- Tạo các bảng: datasets, schema_versions, lineage_edges, violations, audit_log.
+- Tạo các bảng: datasets, schema_versions, lineage_edges, violations, audit_log,
+  pipeline_runs, batch_ingestions, dataset_versions, dataset_version_inputs.
+- Nâng cấp DB tạo từ phiên bản cũ (thêm cột mới, chuyển audit_log sang dạng chuỗi băm)
+  mà không mất dữ liệu.
 - Cung cấp hàm init_database() cho toàn bộ dự án.
+
+Đường dẫn DB mặc định là metadata.db ở gốc repo, đổi được bằng biến môi trường CLINICAL_GOV_DB.
 """
 
 import os
 import sqlite3
+from datetime import datetime
 from typing import Optional
 
-DEFAULT_DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "metadata.db"))
+DEFAULT_DB_PATH = os.path.abspath(
+    os.environ.get("CLINICAL_GOV_DB")
+    or os.path.join(os.path.dirname(__file__), "..", "metadata.db")
+)
+
+# Cấu trúc bảng audit_log (dùng cả khi tạo mới lẫn khi nâng cấp DB cũ).
+# prev_hash / row_hash tạo thành chuỗi băm: sửa hay xóa một dòng là verify_audit_chain() phát hiện.
+CAU_LENH_AUDIT_LOG = """
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thoi_gian TEXT NOT NULL,
+    ai TEXT NOT NULL,
+    lam_gi TEXT NOT NULL,
+    bang_nao TEXT DEFAULT '',
+    ket_qua TEXT NOT NULL CHECK(ket_qua IN ('ALLOWED', 'DENIED', 'BLOCKED', 'SUCCESS', 'FAILED')),
+    run_id TEXT DEFAULT '',
+    prev_hash TEXT NOT NULL,
+    row_hash TEXT NOT NULL
+);
+"""
+
+
+def now_str() -> str:
+    """Thời gian hiện tại (giờ máy) dạng 'YYYY-MM-DD HH:MM:SS', dùng chung cho mọi bảng."""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def get_db_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
     """Tạo kết nối tới SQLite metadata.db."""
     path = db_path or DEFAULT_DB_PATH
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    conn = sqlite3.connect(path)
+    # timeout: dashboard và pipeline có thể cùng ghi một lúc -> chờ khóa thay vì báo lỗi ngay
+    conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _cac_cot(cursor: sqlite3.Cursor, bang: str) -> set:
+    cursor.execute(f"PRAGMA table_info({bang});")
+    return {row["name"] for row in cursor.fetchall()}
+
+
+def _them_cot_neu_thieu(cursor: sqlite3.Cursor, bang: str, cac_cot_moi: list[tuple[str, str]]) -> None:
+    """Thêm cột vào bảng đã có (DB tạo từ phiên bản cũ của dự án)."""
+    hien_co = _cac_cot(cursor, bang)
+    for cot, kieu in cac_cot_moi:
+        if cot not in hien_co:
+            cursor.execute(f"ALTER TABLE {bang} ADD COLUMN {cot} {kieu};")
+
+
+def _nang_cap_audit_log(conn: sqlite3.Connection) -> None:
+    """
+    audit_log của phiên bản cũ lưu trùng 2 bộ cột (ai/actor, lam_gi/action, ...) và chưa có chuỗi băm.
+    Chuyển sang cấu trúc mới, giữ nguyên id và nội dung, tính chuỗi băm cho toàn bộ các dòng cũ.
+    """
+    from catalog_access.audit import _chen_dong_audit, _chuan_hoa_ket_qua
+
+    cursor = conn.cursor()
+    cot_cu = _cac_cot(cursor, "audit_log")
+    if not cot_cu or "row_hash" in cot_cu:
+        return
+
+    def _lay(viet: str, anh: str) -> str:
+        co = [c for c in (viet, anh) if c in cot_cu]
+        if len(co) == 2:
+            return f"COALESCE(NULLIF({viet}, ''), {anh}, '')"
+        return f"COALESCE({co[0]}, '')" if co else "''"
+
+    cursor.execute("ALTER TABLE audit_log RENAME TO audit_log_cu;")
+    cursor.execute(CAU_LENH_AUDIT_LOG)
+    dong_cu = cursor.execute(
+        f"SELECT id, {_lay('thoi_gian', 'timestamp')} AS thoi_gian, {_lay('ai', 'actor')} AS ai, "
+        f"{_lay('lam_gi', 'action')} AS lam_gi, {_lay('bang_nao', 'target_table')} AS bang_nao, "
+        f"{_lay('ket_qua', 'result')} AS ket_qua FROM audit_log_cu ORDER BY id"
+    ).fetchall()
+    for d in dong_cu:
+        _chen_dong_audit(conn, str(d["thoi_gian"] or now_str()), d["ai"] or "unknown_user",
+                         d["lam_gi"] or "unknown_action", d["bang_nao"], _chuan_hoa_ket_qua(d["ket_qua"]),
+                         ma=d["id"])
+    cursor.execute("DROP TABLE audit_log_cu;")
+    conn.commit()
 
 
 def init_database(db_path: Optional[str] = None, seed_sample_data: bool = True) -> str:
@@ -30,7 +107,11 @@ def init_database(db_path: Optional[str] = None, seed_sample_data: bool = True) 
     2. schema_versions: Lịch sử schema và phát hiện thay đổi (Người 2 ghi, Người 3 hiển thị)
     3. lineage_edges: Quan hệ nguồn gốc dữ liệu giữa các cột/bảng (Người 2 ghi, Người 3 hiển thị)
     4. violations: Danh sách vi phạm chất lượng / schema (Người 2 ghi, Người 3 hiển thị)
-    5. audit_log: Sổ ghi chép toàn bộ hoạt động truy cập và kiểm định (Người 3 phụ trách)
+    5. audit_log: Sổ ghi chép toàn bộ hoạt động truy cập và kiểm định, có chuỗi băm chống sửa (Người 3)
+    6. pipeline_runs, batch_ingestions, dataset_versions, dataset_version_inputs:
+       provenance theo từng lần chạy và từng lô dữ liệu (governance/provenance.py)
+
+    Gọi nhiều lần không sao: bảng đã có thì giữ nguyên, DB cũ thì được nâng cấp.
     """
     path = db_path or DEFAULT_DB_PATH
     conn = get_db_connection(path)
@@ -48,6 +129,14 @@ def init_database(db_path: Optional[str] = None, seed_sample_data: bool = True) 
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """)
+    # Thông tin bổ sung của catalog: mô tả, hợp đồng áp dụng, vị trí file, số dòng, lần cập nhật cuối
+    _them_cot_neu_thieu(cursor, "datasets", [
+        ("description", "TEXT DEFAULT ''"),
+        ("contract", "TEXT DEFAULT ''"),
+        ("file_path", "TEXT DEFAULT ''"),
+        ("row_count", "INTEGER"),
+        ("updated_at", "TEXT DEFAULT ''"),
+    ])
 
     # 2. Bảng schema_versions: Lưu và so sánh schema các phiên bản
     cursor.execute("""
@@ -90,55 +179,68 @@ def init_database(db_path: Optional[str] = None, seed_sample_data: bool = True) 
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """)
+    # Vi phạm thuộc lần chạy nào, lô dữ liệu nào (để truy ngược về đúng file gây lỗi)
+    _them_cot_neu_thieu(cursor, "violations", [
+        ("run_id", "TEXT DEFAULT ''"),
+        ("batch", "TEXT DEFAULT ''"),
+    ])
 
     # 5. Bảng audit_log: Sổ nhật ký ghi lại mọi hành động (thời gian, ai, làm gì, bảng nào, kết quả)
+    _nang_cap_audit_log(conn)
+    cursor.execute(CAU_LENH_AUDIT_LOG)
+
+    # 6. Provenance: mỗi lần chạy pipeline, mỗi lô dữ liệu nguồn, mỗi phiên bản bảng đầu ra
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS audit_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        thoi_gian TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        ai TEXT NOT NULL,
-        lam_gi TEXT NOT NULL,
-        bang_nao TEXT DEFAULT '',
-        ket_qua TEXT NOT NULL CHECK(ket_qua IN ('ALLOWED', 'DENIED', 'BLOCKED', 'SUCCESS', 'FAILED')),
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        actor TEXT,
-        action TEXT,
-        target_table TEXT DEFAULT '',
-        result TEXT
+    CREATE TABLE IF NOT EXISTS pipeline_runs (
+        run_id TEXT PRIMARY KEY,
+        actor TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        finished_at TEXT DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'RUNNING'
+            CHECK(status IN ('RUNNING', 'SUCCESS', 'PARTIAL', 'BLOCKED', 'FAILED')),
+        code_version TEXT DEFAULT '',
+        note TEXT DEFAULT ''
     );
     """)
-
-    # Đảm bảo các cột tiếng Việt tồn tại nếu bảng đã được tạo trước đó
-    cursor.execute("PRAGMA table_info(audit_log);")
-    existing_cols = [row["name"] for row in cursor.fetchall()]
-    for col, col_type in [
-        ("thoi_gian", "TEXT DEFAULT ''"),
-        ("ai", "TEXT DEFAULT ''"),
-        ("lam_gi", "TEXT DEFAULT ''"),
-        ("bang_nao", "TEXT DEFAULT ''"),
-        ("ket_qua", "TEXT DEFAULT ''"),
-    ]:
-        if col not in existing_cols:
-            cursor.execute(f"ALTER TABLE audit_log ADD COLUMN {col} {col_type};")
-
-    # Xóa các cột chi_tiet và details nếu còn tồn tại
-    for drop_col in ["chi_tiet", "details"]:
-        if drop_col in existing_cols:
-            try:
-                cursor.execute(f"ALTER TABLE audit_log DROP COLUMN {drop_col};")
-            except Exception:
-                pass
-
-    # Cập nhật dữ liệu cũ nếu thoi_gian hoặc ai còn trống
     cursor.execute("""
-    UPDATE audit_log
-    SET thoi_gian = COALESCE(NULLIF(thoi_gian, ''), timestamp),
-        ai = COALESCE(NULLIF(ai, ''), actor),
-        lam_gi = COALESCE(NULLIF(lam_gi, ''), action),
-        bang_nao = COALESCE(NULLIF(bang_nao, ''), target_table),
-        ket_qua = COALESCE(NULLIF(ket_qua, ''), result)
-    WHERE thoi_gian IS NULL OR thoi_gian = '';
+    CREATE TABLE IF NOT EXISTS batch_ingestions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        table_name TEXT NOT NULL,
+        hospital TEXT NOT NULL,
+        batch TEXT NOT NULL,
+        source_file TEXT NOT NULL,
+        checksum TEXT NOT NULL,
+        row_count INTEGER NOT NULL,
+        schema_version INTEGER,
+        contract TEXT DEFAULT '',
+        status TEXT NOT NULL CHECK(status IN ('ACCEPTED', 'BLOCKED', 'SKIPPED')),
+        recorded_at TEXT NOT NULL
+    );
     """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS dataset_versions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        table_name TEXT NOT NULL,
+        tier TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        checksum TEXT NOT NULL,
+        row_count INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS dataset_version_inputs (
+        version_id INTEGER NOT NULL,
+        input_type TEXT NOT NULL CHECK(input_type IN ('batch', 'dataset_version')),
+        input_id INTEGER NOT NULL,
+        PRIMARY KEY (version_id, input_type, input_id)
+    );
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_batch_run ON batch_ingestions(run_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_version_table ON dataset_versions(table_name);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_violation_run ON violations(run_id);")
 
     conn.commit()
 
@@ -151,6 +253,8 @@ def init_database(db_path: Optional[str] = None, seed_sample_data: bool = True) 
 
 def _seed_default_data_if_empty(cursor: sqlite3.Cursor, conn: sqlite3.Connection):
     """Nạp dữ liệu mẫu ban đầu để hệ thống và dashboard có thể hoạt động và kiểm thử ngay."""
+    from catalog_access.audit import _chen_dong_audit
+
     # Kiểm tra nếu chưa có datasets
     cursor.execute("SELECT COUNT(*) FROM datasets;")
     if cursor.fetchone()[0] == 0:
@@ -193,7 +297,7 @@ def _seed_default_data_if_empty(cursor: sqlite3.Cursor, conn: sqlite3.Connection
             ("raw_patient_hospital_B", "patientunitstayid", "standardized_patients", "patient_id", "mapping trực tiếp"),
             ("raw_patient_hospital_C", "patientunitstayid", "standardized_patients", "patient_id", "mapping trực tiếp"),
             ("raw_patient_hospital_B", "admissionweight", "standardized_patients", "weight_kg", "chuẩn hóa đơn vị kg"),
-            ("standardized_patients", "patient_id", "ai_ready_icu_mortality", "patient_hash", "giả danh hóa SHA-256"),
+            ("standardized_patients", "patient_id", "ai_ready_icu_mortality", "patient_hash", "giả danh hóa HMAC-SHA256"),
             ("standardized_patients", "weight_kg", "ai_ready_icu_mortality", "weight_kg", "chọn lọc biến đầu vào AI"),
             ("standardized_patients", "age", "ai_ready_icu_mortality", "age", "chuẩn hóa số nguyên"),
             ("standardized_patients", "gender", "ai_ready_icu_mortality", "gender", "mã hóa M/F"),
@@ -215,26 +319,18 @@ def _seed_default_data_if_empty(cursor: sqlite3.Cursor, conn: sqlite3.Connection
         VALUES (?, ?, ?, ?, ?, ?, ?);
         """, sample_violations)
 
-    # Dữ liệu mẫu Audit Log
+    # Dữ liệu mẫu Audit Log (ghi qua chuỗi băm như mọi dòng audit khác)
     cursor.execute("SELECT COUNT(*) FROM audit_log;")
     if cursor.fetchone()[0] == 0:
         sample_audit = [
-            ("2026-10-16 08:00:00", "admin_system", "init_system", "metadata.db", "SUCCESS",
-             "2026-10-16 08:00:00", "admin_system", "init_system", "metadata.db", "SUCCESS"),
-            ("2026-10-16 08:30:00", "engineer_alice", "read", "raw_patient_hospital_A", "ALLOWED",
-             "2026-10-16 08:30:00", "engineer_alice", "read", "raw_patient_hospital_A", "ALLOWED"),
-            ("2026-10-16 09:15:00", "pipeline_worker", "check_gate", "raw_patient_hospital_B", "BLOCKED",
-             "2026-10-16 09:15:00", "pipeline_worker", "check_gate", "raw_patient_hospital_B", "BLOCKED"),
-            ("2026-10-16 10:00:00", "researcher_bob", "read", "ai_ready_icu_mortality", "ALLOWED",
-             "2026-10-16 10:00:00", "researcher_bob", "read", "ai_ready_icu_mortality", "ALLOWED"),
-            ("2026-10-16 10:05:00", "researcher_bob", "read", "raw_patient_hospital_A", "DENIED",
-             "2026-10-16 10:05:00", "researcher_bob", "read", "raw_patient_hospital_A", "DENIED"),
+            ("2026-10-16 08:00:00", "admin_system", "init_system", "metadata.db", "SUCCESS"),
+            ("2026-10-16 08:30:00", "engineer_alice", "read", "raw_patient_hospital_A", "ALLOWED"),
+            ("2026-10-16 09:15:00", "pipeline_worker", "check_gate", "raw_patient_hospital_B", "BLOCKED"),
+            ("2026-10-16 10:00:00", "researcher_bob", "read", "ai_ready_icu_mortality", "ALLOWED"),
+            ("2026-10-16 10:05:00", "researcher_bob", "read", "raw_patient_hospital_A", "DENIED"),
         ]
-        cursor.executemany("""
-        INSERT INTO audit_log (thoi_gian, ai, lam_gi, bang_nao, ket_qua,
-                               timestamp, actor, action, target_table, result)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-        """, sample_audit)
+        for dong in sample_audit:
+            _chen_dong_audit(conn, *dong)
 
     conn.commit()
 

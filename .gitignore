@@ -8,3 +8,6 @@ __pycache__/
 .idea/
 .ipynb_checkpoints/
 .pytest_cache/
+
+# Khóa giả danh HMAC (tự sinh khi chạy lần đầu) - KHÔNG commit
+.secrets/
