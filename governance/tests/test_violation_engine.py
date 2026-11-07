@@ -74,3 +74,64 @@ def test_thong_ke(db_path):
     assert tk["theo_muc_do"] == {"BREAKING": 1, "WARNING": 1}
     assert tk["theo_benh_vien"] == {"Bệnh viện A": 1, "Bệnh viện C": 1}
     assert len(get_violations(db_path, severity="warning")) == 1
+
+
+# ---------------------------------------------------------------------------
+# Vòng đời vi phạm: OPEN -> RESOLVED / SUPERSEDED khi lần chạy sau kết thúc
+# ---------------------------------------------------------------------------
+
+def _lan_chay(tmp_path, db_path, ten, lo_qua_cong=(), loi=()):
+    """Một lần chạy giả: các lô (bảng, lô) qua cổng và các vi phạm (loại, bảng, lô) ghi trong lần chạy đó."""
+    from catalog_access import audit_context
+    from governance import provenance as pv
+
+    tep = tmp_path / f"{ten}.csv"
+    tep.write_text("a\n1\n", encoding="utf-8")
+    with pv.pipeline_run("pipeline_service", ten, db_path) as run_id:
+        for loai, bang, lo in loi:
+            with audit_context(batch=lo):
+                report_violation(loai, "BREAKING", bang, "lỗi", db_path=db_path, in_ra=False)
+        for bang, lo in lo_qua_cong:
+            pv.record_batch(bang, "Bệnh viện B", lo, str(tep), 1, "ACCEPTED", db_path=db_path)
+    return run_id
+
+
+def test_vi_pham_moi_dang_mo(tmp_path, db_path):
+    _lan_chay(tmp_path, db_path, "lan_1", loi=[("SCHEMA_COLUMN_RENAMED", "raw_patient_hospital_B", "hospital_B/dot_3")])
+    assert [v["status"] for v in get_violations(db_path)] == ["OPEN"]
+
+
+def test_lo_qua_cong_o_lan_sau_thi_resolved(tmp_path, db_path):
+    lo = ("raw_patient_hospital_B", "hospital_B/dot_3")
+    _lan_chay(tmp_path, db_path, "lan_1", loi=[("SCHEMA_COLUMN_RENAMED", *lo)])
+    run_2 = _lan_chay(tmp_path, db_path, "lan_2", lo_qua_cong=[lo])
+    v = get_violations(db_path)[0]
+    assert (v["status"], v["resolved_run_id"]) == ("RESOLVED", run_2)
+    assert "qua cổng" in v["resolution"] and v["resolved_at"]
+
+
+def test_loi_lap_lai_thi_dong_cu_superseded(tmp_path, db_path):
+    loi = ("PLAUSIBILITY", "raw_vital_hospital_B", "hospital_B/dot_1")
+    _lan_chay(tmp_path, db_path, "lan_1", loi=[loi])
+    _lan_chay(tmp_path, db_path, "lan_2", loi=[loi])
+    moi, cu = get_violations(db_path)
+    assert (moi["status"], cu["status"]) == ("OPEN", "SUPERSEDED")
+    assert len(get_violations(db_path, status="open")) == 1
+
+
+def test_lo_chua_kiem_tra_lai_van_mo(tmp_path, db_path):
+    _lan_chay(tmp_path, db_path, "lan_1", loi=[("COMPLETENESS", "raw_patient_hospital_B", "hospital_B/dot_3")])
+    _lan_chay(tmp_path, db_path, "lan_2", lo_qua_cong=[("raw_patient_hospital_B", "hospital_B/dot_1")])
+    assert get_violations(db_path)[0]["status"] == "OPEN"
+
+
+def test_vi_pham_muc_bang_resolved_khi_co_phien_ban_moi(tmp_path, db_path):
+    from governance import provenance as pv
+
+    _lan_chay(tmp_path, db_path, "lan_1", loi=[("PROVENANCE_UNVERIFIED", "standardized_patients", "")])
+    tep = tmp_path / "std.csv"
+    tep.write_text("a\n1\n", encoding="utf-8")
+    with pv.pipeline_run("pipeline_service", "lan_2", db_path):
+        pv.record_dataset_version("standardized_patients", "standardized", str(tep), 1, [], db_path=db_path)
+    assert get_violations(db_path)[0]["status"] == "RESOLVED"
+    assert summarize(db_path, in_ra=False)["theo_trang_thai"] == {"RESOLVED": 1}

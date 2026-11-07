@@ -130,3 +130,20 @@ def test_tang_sai_trong_hop_dong_bi_bao_loi(tmp_path):
         encoding="utf-8")
     with pytest.raises(ValueError, match="tầng"):
         load_contracts(str(tmp_path))
+
+
+def test_hmac_spark_khop_python_va_khoa_khong_nam_trong_ke_hoach(spark):
+    """Giả danh bằng Spark ra đúng mã như Python; khóa không hiện trong kế hoạch truy vấn (Spark UI)."""
+    from governance.privacy import pseudonymize_spark
+
+    df = spark.createDataFrame([(141234,), (2,)], "patient_id long")
+    kq = pseudonymize_spark(df, secret=KHOA)
+    assert kq.columns == ["patient_id", "patient_hash"]
+    assert {r["patient_id"]: r["patient_hash"] for r in kq.collect()} == {
+        141234: pseudonymize_id(141234, KHOA), 2: pseudonymize_id(2, KHOA)}
+
+    ke_hoach = kq._jdf.queryExecution().toString().upper()
+    ipad = bytes(b ^ 0x36 for b in KHOA.ljust(64, b"\0")).hex().upper()
+    opad = bytes(b ^ 0x5C for b in KHOA.ljust(64, b"\0")).hex().upper()
+    assert ipad[:32] not in ke_hoach and opad[:32] not in ke_hoach
+    assert KHOA.hex().upper()[:24] not in ke_hoach and KHOA.decode().upper() not in ke_hoach

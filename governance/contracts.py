@@ -7,9 +7,15 @@ Mỗi hợp đồng có trường `applies_to` là danh sách tên bảng, cho p
 Trường `tier` cho biết hợp đồng thuộc tầng nào; tầng ai_ready có thêm luật quyền riêng tư
 (governance/privacy.py): chỉ được chứa đúng các cột khai báo và không được có cột định danh.
 
+Trường `min_bad_rows` (mặc định 5): lỗi theo tỷ lệ chỉ BREAKING khi có ít nhất chừng ấy dòng lỗi.
+Lô nhỏ (vài bệnh nhân) thì 1-2 ô trống đã vượt ngưỡng %, nên chỉ cảnh báo chứ không chặn oan.
+
+Hợp đồng được đọc một lần rồi giữ trong bộ nhớ; sửa file YAML thì lần đọc sau tự nạp lại.
+
 Chạy thử: python -m governance.contracts
 """
 
+import copy
 import fnmatch
 import os
 import re
@@ -33,10 +39,17 @@ MAC_DINH_COT = {
     "allowed_values": None,
     "pattern": None,
     "sensitive": False,
+    "semantics": None,
     "description": "",
 }
 
 CAC_TANG_HOP_LE = {"raw", "standardized", "ai_ready"}
+
+# Số dòng lỗi tối thiểu để lỗi theo tỷ lệ bị coi là BREAKING (ghi đè bằng min_bad_rows trong hợp đồng)
+MIN_DONG_LOI_MAC_DINH = 5
+
+# Bộ nhớ đệm: thư mục -> (dấu vết các file YAML, danh sách hợp đồng đã chuẩn hóa)
+_BO_NHO_DEM: dict = {}
 
 
 def _chuan_hoa_hop_dong(hop_dong: dict, ten_file: str) -> dict:
@@ -52,6 +65,9 @@ def _chuan_hoa_hop_dong(hop_dong: dict, ten_file: str) -> dict:
         raise ValueError(f"Hợp đồng '{ten_file}': tầng '{hop_dong['tier']}' không hợp lệ "
                          f"(chỉ chấp nhận {sorted(CAC_TANG_HOP_LE)})")
     hop_dong["version"] = str(hop_dong["version"])
+    hop_dong["min_bad_rows"] = int(hop_dong.get("min_bad_rows", MIN_DONG_LOI_MAC_DINH))
+    if hop_dong["min_bad_rows"] < 1:
+        raise ValueError(f"Hợp đồng '{ten_file}': min_bad_rows phải >= 1")
 
     cot_da_chuan_hoa = {}
     for ten_cot, luat in (hop_dong["columns"] or {}).items():
@@ -72,37 +88,49 @@ def _chuan_hoa_hop_dong(hop_dong: dict, ten_file: str) -> dict:
     return hop_dong
 
 
+def _hop_dong_da_doc(contracts_dir: Optional[str] = None) -> list[dict]:
+    """
+    Danh sách hợp đồng đã chuẩn hóa, giữ trong bộ nhớ (KHÔNG sửa trực tiếp các dict trả về).
+    Pipeline tra hợp đồng hàng nghìn lần mỗi lần chạy (mỗi lô vài lần) nên chỉ đọc lại YAML khi có
+    file được thêm / xóa / sửa.
+    """
+    thu_muc = os.path.abspath(contracts_dir or CONTRACTS_DIR)
+    cac_file = sorted(f for f in os.listdir(thu_muc) if f.endswith((".yaml", ".yml")))
+    dau_vet = tuple((f, os.stat(os.path.join(thu_muc, f)).st_mtime_ns) for f in cac_file)
+    da_luu = _BO_NHO_DEM.get(thu_muc)
+    if da_luu is None or da_luu[0] != dau_vet:
+        danh_sach = []
+        for ten_file in cac_file:
+            with open(os.path.join(thu_muc, ten_file), "r", encoding="utf-8") as f:
+                hop_dong = yaml.safe_load(f)
+            danh_sach.append(_chuan_hoa_hop_dong(hop_dong, ten_file))
+        _BO_NHO_DEM[thu_muc] = da_luu = (dau_vet, danh_sach)
+    return da_luu[1]
+
+
 def load_contracts(contracts_dir: Optional[str] = None) -> list[dict]:
-    """Đọc tất cả file *.yaml trong thư mục hợp đồng, trả về danh sách hợp đồng."""
-    thu_muc = contracts_dir or CONTRACTS_DIR
-    danh_sach = []
-    for ten_file in sorted(os.listdir(thu_muc)):
-        if not ten_file.endswith((".yaml", ".yml")):
-            continue
-        with open(os.path.join(thu_muc, ten_file), "r", encoding="utf-8") as f:
-            hop_dong = yaml.safe_load(f)
-        danh_sach.append(_chuan_hoa_hop_dong(hop_dong, ten_file))
-    return danh_sach
+    """Đọc tất cả file *.yaml trong thư mục hợp đồng, trả về danh sách hợp đồng (bản sao, sửa thoải mái)."""
+    return copy.deepcopy(_hop_dong_da_doc(contracts_dir))
 
 
 def find_contract(ten_bang: str, contracts_dir: Optional[str] = None) -> Optional[dict]:
     """
     Tìm hợp đồng áp dụng cho `ten_bang`.
     Ưu tiên hợp đồng ghi đúng tên bảng; nếu không có thì dùng hợp đồng có mẫu `*` khớp.
-    Không tìm thấy -> trả về None.
+    Không tìm thấy -> trả về None. Trả về bản sao (sửa thoải mái).
     """
-    hop_dong_list = load_contracts(contracts_dir)
+    hop_dong_list = _hop_dong_da_doc(contracts_dir)
 
     # 1. Khớp chính xác tên bảng
     for hop_dong in hop_dong_list:
         if ten_bang in hop_dong["applies_to"]:
-            return hop_dong
+            return copy.deepcopy(hop_dong)
 
     # 2. Khớp theo mẫu (ví dụ raw_patient_hospital_*)
     for hop_dong in hop_dong_list:
         for mau in hop_dong["applies_to"]:
             if fnmatch.fnmatchcase(ten_bang, mau):
-                return hop_dong
+                return copy.deepcopy(hop_dong)
     return None
 
 

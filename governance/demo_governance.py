@@ -3,7 +3,8 @@ Demo phần Governance (chạy độc lập với pipeline của Người 1).
 
 Kịch bản (tài liệu phân công mục 8):
   1. Dữ liệu sạch của 3 bệnh viện đi qua gate1 + gate2 ở cả 3 tầng -> không có lỗi BREAKING.
-  2. Bệnh viện B đổi tên cột admissionweight -> weight.
+  2. Bệnh viện đông bệnh nhân thứ 2 (B của dữ liệu giả, 123 của dữ liệu thật) đổi tên cột
+     admissionweight -> weight.
   3. Hệ thống phát hiện, chặn, ghi violations (BREAKING), chỉ ra ai_ready_icu_mortality bị ảnh hưởng.
   4. audit_log có dòng BLOCKED.
 
@@ -32,6 +33,7 @@ from governance.sample_data import (
     make_hospital,
     standardize_labs,
     standardize_patients,
+    top_hospitals,
 )
 from governance.violation_engine import get_violations, summarize
 
@@ -48,14 +50,17 @@ def tieu_de(chu: str) -> None:
 # ---------------------------------------------------------------------------
 
 def co_du_lieu_that() -> bool:
-    return all(os.path.exists(os.path.join(STAGING_DIR, f"hospital_{v}", "patient.csv")) for v in "ABC")
+    return bool(top_hospitals(STAGING_DIR))
 
 
 def doc_du_lieu(dung_du_lieu_gia: bool) -> tuple[dict, str]:
-    """Trả về ({'A': {'patient', 'lab', 'vital'}, ...}, mô tả nguồn dữ liệu)."""
+    """
+    Trả về ({mã viện: {'patient', 'lab', 'vital'}}, mô tả nguồn dữ liệu).
+    Dữ liệu thật: 3 viện đông bệnh nhân nhất (146, 123, 157); dữ liệu giả: A, B, C.
+    """
     if not dung_du_lieu_gia and co_du_lieu_that():
         raw = {}
-        for vien in "ABC":
+        for vien in top_hospitals(STAGING_DIR):
             thu_muc = os.path.join(STAGING_DIR, f"hospital_{vien}")
             raw[vien] = {
                 "patient": pd.read_csv(os.path.join(thu_muc, "patient.csv")),
@@ -66,13 +71,13 @@ def doc_du_lieu(dung_du_lieu_gia: bool) -> tuple[dict, str]:
     return {v: make_hospital(v) for v in "ABC"}, "dữ liệu GIẢ mô phỏng eICU (governance/sample_data.py)"
 
 
-def dang_ky_catalog(db: str) -> None:
+def dang_ky_catalog(db: str, cac_vien) -> None:
     """Đăng ký 12 bảng vào catalog (hàm register_dataset của Người 3), cột nhạy cảm lấy từ hợp đồng."""
     def _nhay_cam(ten):
         hop_dong = find_contract(ten)
         return ",".join(get_sensitive_columns(hop_dong)) if hop_dong else ""
 
-    for vien in "ABC":
+    for vien in cac_vien:
         for loai in ("patient", "lab", "vital"):
             ten = f"raw_{loai}_hospital_{vien}"
             register_dataset(ten, f"Bệnh viện {vien}", "raw", f"Đội IT Bệnh viện {vien}",
@@ -124,22 +129,23 @@ def kich_ban_1_du_lieu_sach(raw: dict, db: str) -> bool:
 
 
 def kich_ban_2_doi_ten_cot(raw: dict, db: str) -> bool:
-    tieu_de("KỊCH BẢN 2: Bệnh viện B đổi tên cột admissionweight -> weight")
-    loi_df = raw["B"]["patient"].rename(columns={"admissionweight": "weight"})
-    dat, loi = check_gate("raw_patient_hospital_B", loi_df, "gate1", db)
-    print(f"\nKết quả check_gate('raw_patient_hospital_B', ..., 'gate1'): đạt = {dat}")
+    vien = list(raw)[1]                     # viện đông bệnh nhân thứ 2 (B của dữ liệu giả, 123 của dữ liệu thật)
+    tieu_de(f"KỊCH BẢN 2: Bệnh viện {vien} đổi tên cột admissionweight -> weight")
+    loi_df = raw[vien]["patient"].rename(columns={"admissionweight": "weight"})
+    dat, loi = check_gate(f"raw_patient_hospital_{vien}", loi_df, "gate1", db)
+    print(f"\nKết quả check_gate('raw_patient_hospital_{vien}', ..., 'gate1'): đạt = {dat}")
     for dong in loi:
         print("  -", dong)
     return dat
 
 
-def kiem_tra_ket_qua(db: str, vp_dau: int, audit_dau: int, sach_dat: bool, loi_dat: bool) -> bool:
+def kiem_tra_ket_qua(db: str, vp_dau: int, audit_dau: int, sach_dat: bool, loi_dat: bool, vien: str) -> bool:
     tieu_de("KIỂM TRA KẾT QUẢ")
     vi_pham = get_violations(db, since_id=vp_dau)
     conn = get_db_connection(db)
     audit_chan = conn.execute(
         "SELECT ai, lam_gi, bang_nao, ket_qua FROM audit_log WHERE id > ? AND ket_qua = 'BLOCKED' "
-        "AND bang_nao = 'raw_patient_hospital_B'", (audit_dau,)
+        "AND bang_nao = ?", (audit_dau, f"raw_patient_hospital_{vien}")
     ).fetchall()
     conn.close()
 
@@ -150,10 +156,10 @@ def kiem_tra_ket_qua(db: str, vp_dau: int, audit_dau: int, sach_dat: bool, loi_d
     cac_dieu_kien = [
         ("Kịch bản 1: dữ liệu sạch đạt ở mọi cổng", sach_dat),
         ("Kịch bản 1: không có vi phạm BREAKING nào", not breaking_ngoai_kich_ban_2),
-        ("Kịch bản 2: dữ liệu viện B bị chặn", not loi_dat),
+        (f"Kịch bản 2: dữ liệu viện {vien} bị chặn", not loi_dat),
         ("violations có dòng BREAKING SCHEMA_COLUMN_RENAMED, ảnh hưởng ai_ready_icu_mortality",
          bool(vp_doi_ten)),
-        ("audit_log có dòng BLOCKED cho raw_patient_hospital_B", bool(audit_chan)),
+        (f"audit_log có dòng BLOCKED cho raw_patient_hospital_{vien}", bool(audit_chan)),
     ]
     for mo_ta, dat in cac_dieu_kien:
         print(f"  {'✅' if dat else '❌'} {mo_ta}")
@@ -187,12 +193,12 @@ def main(argv=None) -> int:
     print(f"Metadata DB  : {args.db}")
 
     vp_dau, audit_dau = id_lon_nhat(args.db, "violations"), id_lon_nhat(args.db, "audit_log")
-    dang_ky_catalog(args.db)
-    record_sample_lineage(args.db)
+    dang_ky_catalog(args.db, list(raw))
+    record_sample_lineage(args.db, list(raw))
 
     sach_dat = kich_ban_1_du_lieu_sach(raw, args.db)
     loi_dat = kich_ban_2_doi_ten_cot(raw, args.db)
-    thanh_cong = kiem_tra_ket_qua(args.db, vp_dau, audit_dau, sach_dat, loi_dat)
+    thanh_cong = kiem_tra_ket_qua(args.db, vp_dau, audit_dau, sach_dat, loi_dat, list(raw)[1])
 
     print("\n" + ("🎉 DEMO THÀNH CÔNG" if thanh_cong else "❌ DEMO CHƯA ĐẠT, xem các dòng ❌ ở trên"))
     return 0 if thanh_cong else 1

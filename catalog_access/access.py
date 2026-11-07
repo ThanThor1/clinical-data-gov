@@ -30,6 +30,9 @@ from catalog_access.audit import log_event
 
 DEFAULT_POLICY_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "policies.yaml"))
 
+# policies.yaml được đọc lại chỉ khi file thay đổi (pipeline kiểm tra quyền hàng trăm lần mỗi lần chạy)
+_CHINH_SACH_DA_DOC: Dict[str, Any] = {}
+
 HANH_DONG_DOC = ("read", "select", "query")
 HANH_DONG_GHI = ("write", "update", "delete", "insert")
 
@@ -47,55 +50,31 @@ class AccessDenied(PermissionError):
 
 def load_policies(policy_path: Optional[str] = None) -> Dict[str, Any]:
     """Tải tập luật phân quyền từ file YAML."""
-    path = policy_path or DEFAULT_POLICY_PATH
+    path = os.path.abspath(policy_path or DEFAULT_POLICY_PATH)
     if not os.path.exists(path):
         raise FileNotFoundError(f"Không tìm thấy file chính sách phân quyền tại: {path}")
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    dau_vet = os.stat(path).st_mtime_ns
+    da_doc = _CHINH_SACH_DA_DOC.get(path)
+    if da_doc is None or da_doc[0] != dau_vet:
+        with open(path, "r", encoding="utf-8") as f:
+            da_doc = _CHINH_SACH_DA_DOC[path] = (dau_vet, yaml.safe_load(f))
+    return da_doc[1]
 
 
 def resolve_role(user_identifier: str, policies: Optional[Dict[str, Any]] = None) -> str:
     """
-    Xác định vai trò (role) của người dùng hoặc định danh truyền vào.
-    Hỗ trợ cả tên người dùng cụ thể và tên vai trò tiếng Việt/tiếng Anh.
+    Vai trò của một tài khoản: CHỈ tra mục `users` trong policies.yaml.
+    Tên vai trò ("data_engineer", "Kỹ sư dữ liệu", ...) không phải tài khoản -> không được nhận vai trò đó,
+    nếu không ai gõ tên vai trò cũng có toàn quyền và audit_log không ghi được người thật.
+    Tài khoản không có trong danh sách -> default_role (mặc định guest, bị từ chối mọi tầng dữ liệu).
     """
     if not policies:
         policies = load_policies()
 
     user_clean = str(user_identifier).strip().lower()
-
-    # Ánh xạ từ ngữ tiếng Việt hoặc bí danh
-    role_aliases = {
-        "kỹ sư dữ liệu": "data_engineer",
-        "ky su du lieu": "data_engineer",
-        "data engineer": "data_engineer",
-        "data_engineer": "data_engineer",
-        "chuyên viên phân tích": "analyst",
-        "chuyen vien phan tich": "analyst",
-        "analyst": "analyst",
-        "nhà nghiên cứu": "researcher",
-        "nha nghien cuu": "researcher",
-        "researcher": "researcher",
-        "khách": "guest",
-        "khach": "guest",
-        "guest": "guest",
-        "viewer": "guest"
-    }
-
-    if user_clean in role_aliases:
-        return role_aliases[user_clean]
-
-    # Kiểm tra trong danh sách users của policies.yaml
     users_map = policies.get("users", {})
     if user_clean in users_map:
         return users_map[user_clean]
-
-    # Kiểm tra nếu truyền trực tiếp tên vai trò hợp lệ
-    roles_map = policies.get("roles", {})
-    if user_clean in roles_map:
-        return user_clean
-
-    # Mặc định lấy default_role
     return policies.get("default_role", "guest")
 
 
@@ -188,7 +167,7 @@ def check_access(
     Đây là hàm chuẩn dùng chung cho cả nhóm theo phân công trong PDF.
 
     Tham số:
-        nguoi_dung (str): Tên tài khoản hoặc tên vai trò (e.g. 'researcher_bob', 'Nhà nghiên cứu').
+        nguoi_dung (str): Tên tài khoản trong policies.yaml (e.g. 'researcher_bob'); tài khoản lạ -> guest.
         bang (str): Tên bảng dữ liệu cần truy cập (e.g. 'raw_patient_hospital_B', 'ai_ready_icu_mortality').
         action (str): Hành động yêu cầu ('read', 'write', 'view_catalog'). Mặc định là 'read'.
         policy_path (str, optional): Đường dẫn policies.yaml.
@@ -270,7 +249,7 @@ if __name__ == "__main__":
     print(f"Nhà nghiên cứu đọc ai_ready_icu_mortality: {'ĐƯỢC PHÉP' if r2 else 'TỪ CHỐI'}")
 
     # 3. Nhà nghiên cứu đọc dữ liệu thô (raw) -> DENIED (Đúng tiêu chí nghiệm thu)
-    r3 = check_access("nhà nghiên cứu", "raw_patient_hospital_B")
+    r3 = check_access("researcher_bob", "raw_patient_hospital_B")
     print(f"Nhà nghiên cứu đọc raw_patient_hospital_B: {'ĐƯỢC PHÉP' if r3 else 'TỪ CHỐI (Ghi vào audit log)'}")
 
     # 4. Khách đọc bảng dữ liệu -> DENIED

@@ -1,6 +1,8 @@
 data/**/*.csv
 data/**/*.csv.gz
 data/**/*.parquet
+# Bản gốc tải từ PhysioNet (Challenge 2012: set-a.tar.gz + Outcomes-a.txt), xem README mục 3
+data/01_landing/challenge2012/
 *.db
 __pycache__/
 .venv/
@@ -11,3 +13,12 @@ __pycache__/
 
 # Khóa giả danh HMAC (tự sinh khi chạy lần đầu) - KHÔNG commit
 .secrets/
+
+# File phụ của SQLite ở chế độ WAL
+*.db-wal
+*.db-shm
+
+# Bảng Delta Lake do pipeline sinh ra (file Parquet + _delta_log)
+data/standardized/*/
+data/ai_ready/*/
+_delta_log/

@@ -2,6 +2,14 @@
 pandas>=2.0.0
 numpy>=1.24.0
 duckdb>=0.9.0
+pyarrow>=14.0
+
+# ===== Big Data: Apache Spark + Delta Lake (cần Java 17 trở lên) =====
+# delta-spark 4.4.1 đi cùng đúng pyspark 4.2.0 -> giữ cố định hai phiên bản này
+pyspark==4.2.0
+delta-spark==4.4.1
+# Đọc bảng Delta không cần Spark / Java (dashboard, read_table)
+deltalake>=1.0,<2
 
 # ===== Config / contracts =====
 pyyaml>=6.0

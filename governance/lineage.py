@@ -12,11 +12,15 @@ Hàm dùng chung (tài liệu phân công mục 4): record_lineage(nguon, dich, 
 Chạy thử: python -m governance.lineage
 """
 
-from typing import Optional
+import os
+from typing import Iterable, Optional
 
 import networkx as nx
 
-from catalog_access.init_db import get_db_connection
+from catalog_access.init_db import DEFAULT_DB_PATH, get_db_connection
+
+# Đồ thị dựng sẵn theo DB: đường dẫn -> (dấu vết bảng lineage_edges, đồ thị)
+_DO_THI_DA_DUNG: dict = {}
 
 
 # ---------------------------------------------------------------------------
@@ -51,12 +55,13 @@ def record_lineage(nguon: str, dich: str, anh_xa_cot: dict[str, str],
     conn.close()
 
 
-def record_sample_lineage(db_path: Optional[str] = None) -> None:
+def record_sample_lineage(db_path: Optional[str] = None, cac_vien: Optional[Iterable[str]] = None) -> None:
     """
-    Ghi lineage mẫu của cả dự án: raw (3 viện) -> standardized -> ai_ready.
-    Dùng cho demo/test chạy độc lập; pipeline thật của Người 1 nên gọi record_lineage tương tự.
+    Ghi lineage của cả dự án: raw (mọi viện) -> standardized -> ai_ready.
+    cac_vien: mã các bệnh viện (mặc định 3 viện mẫu A, B, C của dữ liệu giả); pipeline truyền vào
+    danh sách viện thật tìm thấy trong data/raw (186 viện của eICU demo).
     """
-    for vien in "ABC":
+    for vien in (cac_vien if cac_vien is not None else "ABC"):
         bn = f"raw_patient_hospital_{vien}"
         record_lineage(bn, "standardized_patients", {"patientunitstayid": "patient_id"},
                        "đổi tên cột", db_path)
@@ -65,18 +70,25 @@ def record_sample_lineage(db_path: Optional[str] = None) -> None:
         record_lineage(bn, "standardized_patients", {"gender": "gender"},
                        "Male/Female -> M/F/U", db_path)
         record_lineage(bn, "standardized_patients", {"admissionweight": "weight_kg"},
-                       "chuẩn hóa đơn vị kg", db_path)
-        record_lineage(bn, "standardized_patients", {"hospitalid": "source_hospital"},
-                       "mã viện -> tên bệnh viện", db_path)
+                       "ép số thực; ngoài khoảng hợp lý của hợp đồng -> để trống", db_path)
         record_lineage(bn, "standardized_patients", {"unitdischargestatus": "unitdischargestatus"},
                        "direct", db_path)
 
-        record_lineage(f"raw_lab_hospital_{vien}", "standardized_labs",
-                       {"patientunitstayid": "patient_id", "labname": "lab_name",
-                        "labresult": "lab_value"}, "đổi tên cột", db_path)
+        lab = f"raw_lab_hospital_{vien}"
+        record_lineage(lab, "standardized_labs",
+                       {"patientunitstayid": "patient_id", "labname": "lab_name"}, "đổi tên cột", db_path)
+        record_lineage(lab, "standardized_labs", {"labresult": "lab_value"}, "đổi tên cột, ép số thực", db_path)
 
-        record_lineage(f"raw_vital_hospital_{vien}", "standardized_patients",
-                       {"heartrate": "heartrate_mean"}, "trung bình theo bệnh nhân", db_path)
+        record_lineage(f"raw_vital_hospital_{vien}", "standardized_patients", {"heartrate": "heartrate_mean"},
+                       "ngoài khoảng hợp lý -> để trống, rồi trung bình theo bệnh nhân", db_path)
+
+        # source_hospital / source_batch KHÔNG lấy từ cột hospitalid mà từ đường dẫn file gửi lên
+        # (cột _file = _metadata.file_path của Spark, xem pipeline/standardize.py: _nguon)
+        for bang_raw, bang_std in ((bn, "standardized_patients"), (lab, "standardized_labs")):
+            record_lineage(bang_raw, bang_std, {"_file": "source_hospital"},
+                           "mã viện lấy từ đường dẫn file: hospital_<mã>/<đợt>/...", db_path)
+            record_lineage(bang_raw, bang_std, {"_file": "source_batch"},
+                           "đợt gửi lấy từ đường dẫn file: hospital_<mã>/<đợt>", db_path)
 
     ai = "ai_ready_icu_mortality"
     record_lineage("standardized_patients", ai, {"patient_id": "patient_hash"},
@@ -93,6 +105,18 @@ def record_sample_lineage(db_path: Optional[str] = None) -> None:
         record_lineage("standardized_labs", ai, {"lab_value": cot_ai}, mo_ta, db_path)
         record_lineage("standardized_labs", ai, {"lab_name": cot_ai}, "lọc theo loại xét nghiệm", db_path)
         record_lineage("standardized_labs", ai, {"patient_id": cot_ai}, "ghép theo bệnh nhân", db_path)
+
+
+def record_rename_lineage(table: str, cot_moi: str, cot_chuan: str, ghi_chu: str,
+                          db_path: Optional[str] = None) -> None:
+    """
+    Đổi tên cột đã duyệt (cột `cot_moi` bệnh viện gửi = cột `cot_chuan` của hợp đồng): chép mọi cạnh đi ra từ
+    `table.cot_chuan` thành cạnh đi ra từ `table.cot_moi`, để tra tác động / truy nguồn theo tên cột mới.
+    """
+    for canh in get_lineage_edges(db_path):
+        if canh["source_table"] == table and canh["source_column"] == cot_chuan:
+            record_lineage(table, canh["target_table"], {cot_moi: canh["target_column"]},
+                           f"{ghi_chu} ({cot_moi} = {cot_chuan}); {canh['transformation']}", db_path)
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +137,17 @@ def get_lineage_edges(db_path: Optional[str] = None) -> list[dict]:
 def build_graph(db_path: Optional[str] = None) -> nx.DiGraph:
     """
     Đồ thị có hướng gồm node cột "bang.cot" (kind='column') và node bảng "bang" (kind='table').
+    Đồ thị được giữ lại và chỉ dựng lại khi bảng lineage_edges thay đổi (mỗi vi phạm đều tra đồ thị,
+    với 186 viện có khoảng 2.400 cạnh mức cột).
     """
+    duong_dan = os.path.abspath(db_path or DEFAULT_DB_PATH)
+    conn = get_db_connection(db_path)
+    dau_vet = tuple(conn.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM lineage_edges").fetchone())
+    conn.close()
+    da_dung = _DO_THI_DA_DUNG.get(duong_dan)
+    if da_dung and da_dung[0] == dau_vet:
+        return da_dung[1]
+
     do_thi = nx.DiGraph()
     for canh in get_lineage_edges(db_path):
         nguon = f"{canh['source_table']}.{canh['source_column']}"
@@ -125,6 +159,7 @@ def build_graph(db_path: Optional[str] = None) -> nx.DiGraph:
         do_thi.add_node(canh["source_table"], kind="table", table=canh["source_table"])
         do_thi.add_node(canh["target_table"], kind="table", table=canh["target_table"])
         do_thi.add_edge(canh["source_table"], canh["target_table"])
+    _DO_THI_DA_DUNG[duong_dan] = (dau_vet, do_thi)
     return do_thi
 
 

@@ -111,6 +111,27 @@ def make_vital(vien: str, so_dong_moi_bn: int = 10, seed: int = 0) -> pd.DataFra
     })
 
 
+def top_hospitals(staging_dir: str, k: int = 3) -> list[str]:
+    """
+    Mã k bệnh viện eICU (nguồn mặc định) đông bệnh nhân nhất có trong staging_dir/hospital_<mã>/ (dữ liệu thật
+    đã tách), rỗng nếu chưa tách. Cùng số bệnh nhân thì mã nhỏ trước. Với eICU demo: 146, 123, 157 (vai trò như
+    A, B, C của dữ liệu giả). Nguồn khác (Challenge 2012) không xếp hạng.
+    """
+    import glob
+    import os
+
+    from governance.sources import is_default_source
+
+    so_bn = {}
+    for thu_muc in glob.glob(os.path.join(staging_dir, "hospital_*")):
+        duong_dan = os.path.join(thu_muc, "patient.csv")
+        if os.path.exists(duong_dan) and is_default_source(os.path.basename(thu_muc)[len("hospital_"):]):
+            with open(duong_dan, "rb") as f:
+                so_bn[os.path.basename(thu_muc)[len("hospital_"):]] = sum(1 for _ in f) - 1
+    hang = sorted(so_bn, key=lambda m: (-so_bn[m], int(m) if m.isdigit() else 0, m))
+    return hang[:k] if len(hang) >= k else []
+
+
 def make_hospital(vien: str, seed: int = 0) -> dict[str, pd.DataFrame]:
     """Cả 3 bảng raw của một bệnh viện: {'patient': ..., 'lab': ..., 'vital': ...}."""
     return {
@@ -118,6 +139,45 @@ def make_hospital(vien: str, seed: int = 0) -> dict[str, pd.DataFrame]:
         "lab": make_lab(vien, seed=seed),
         "vital": make_vital(vien, seed=seed),
     }
+
+
+def make_eav_source(thu_muc, so_luot: int = 12, seed: int = 0) -> dict:
+    """
+    Nguồn GIẢ cùng định dạng PhysioNet/CinC Challenge 2012 trong thư mục `thu_muc`: set-a.tar.gz (mỗi lượt nằm
+    ICU một file Time,Parameter,Value, -1 là thiếu) và Outcomes-a.txt. Lượt đầu tiên thiếu giới tính và cân nặng
+    lúc vào (cân nặng chỉ có ở giờ thứ 2); một nửa số lượt tử vong trong bệnh viện.
+    Trả về {RecordID: thông tin} để test so với kết quả của bộ chuyển.
+    """
+    import io
+    import os
+    import tarfile
+
+    rng = np.random.default_rng(seed)
+    ky_vong, ket_qua = {}, []
+    with tarfile.open(os.path.join(thu_muc, "set-a.tar.gz"), "w:gz") as tar:
+        for i in range(so_luot):
+            ma = 200000 + i
+            gioi = -1 if i == 0 else int(i % 2)
+            can_nang = -1 if i == 0 else round(float(rng.uniform(50, 100)), 1)
+            dong = ["Time,Parameter,Value", f"00:00,RecordID,{ma}", f"00:00,Age,{40 + i}", f"00:00,Gender,{gioi}",
+                    "00:00,Height,-1", "00:00,ICUType,3", f"00:00,Weight,{can_nang}"]
+            nhip_tim = [int(rng.integers(60, 110)) for _ in range(3)]
+            dong += [f"00:{10 * (k + 1)},HR,{h}" for k, h in enumerate(nhip_tim)]
+            dong += ["01:05,Creatinine,1.4", "01:05,Glucose,130", "01:05,Mg,2.1", "01:05,Cholesterol,180"]
+            if i == 0:
+                dong.append("02:00,Weight,77.5")
+            noi_dung = ("\n".join(dong) + "\n").encode()
+            muc = tarfile.TarInfo(f"set-a/{ma}.txt")
+            muc.size = len(noi_dung)
+            tar.addfile(muc, io.BytesIO(noi_dung))
+            tu_vong = int(i % 2 == 1)
+            ket_qua.append(f"{ma},10,3,5,-1,{tu_vong}")
+            ky_vong[ma] = {"age": 40 + i, "gender": {-1: None, 0: "Female", 1: "Male"}[gioi],
+                           "weight": 77.5 if i == 0 else can_nang, "hr": nhip_tim,
+                           "status": "Expired" if tu_vong else "Alive"}
+    with open(os.path.join(thu_muc, "Outcomes-a.txt"), "w", encoding="utf-8") as f:
+        f.write("RecordID,SAPS-I,SOFA,Length_of_stay,Survival,In-hospital_death\n" + "\n".join(ket_qua) + "\n")
+    return ky_vong
 
 
 # ---------------------------------------------------------------------------

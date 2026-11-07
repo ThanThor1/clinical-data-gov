@@ -30,9 +30,13 @@ AI = "ai_ready_icu_mortality"
     ("researcher_bob", "standardized_patients", "read", False),
     ("researcher_bob", AI, "write", False),
     ("guest_charlie", AI, "read", False),
-    ("nhà nghiên cứu", "raw_patient_hospital_B", "read", False),
-    ("kỹ sư dữ liệu", "raw_patient_hospital_B", "read", True),
+    ("nha_nghien_cuu", "raw_patient_hospital_B", "read", False),
+    ("ky_su_du_lieu", "raw_patient_hospital_B", "read", True),
     ("nguoi_khong_co_trong_danh_sach", AI, "read", False),
+    # Gõ tên vai trò không phải là đăng nhập: không được nhận quyền của vai trò đó
+    ("data_engineer", "raw_patient_hospital_B", "read", False),
+    ("kỹ sư dữ liệu", "raw_patient_hospital_B", "read", False),
+    ("researcher", AI, "read", False),
     ("engineer_alice", AI, "drop_table", False),
 ])
 def test_ma_tran_quyen(db_path, nguoi_dung, bang, hanh_dong, ky_vong):
@@ -101,9 +105,10 @@ def test_quyen_xem_audit():
 
 @pytest.mark.parametrize("dinh_danh, vai_tro", [
     ("engineer_alice", "data_engineer"), ("pipeline_service", "data_engineer"),
-    ("analyst_dave", "analyst"), ("Chuyên viên phân tích", "analyst"),
-    ("researcher_bob", "researcher"), ("  Nhà Nghiên Cứu ", "researcher"),
+    ("analyst_dave", "analyst"), ("  Researcher_Bob ", "researcher"),
     ("guest_charlie", "guest"), ("ai_do", "guest"),
+    # Tên vai trò (tiếng Anh / tiếng Việt) không có trong mục users -> guest
+    ("data_engineer", "guest"), ("Kỹ sư dữ liệu", "guest"), ("analyst", "guest"), ("  Nhà Nghiên Cứu ", "guest"),
 ])
 def test_xac_dinh_vai_tro(dinh_danh, vai_tro):
     assert resolve_role(dinh_danh) == vai_tro
