@@ -4,7 +4,8 @@ Phụ trách bởi: Người 3 (Quản lý, Catalog, Phân quyền, Audit & Báo
 
 Nhiệm vụ:
 - Tạo các bảng: datasets, schema_versions, lineage_edges, violations, audit_log,
-  pipeline_runs, batch_ingestions, dataset_versions, dataset_version_inputs.
+  pipeline_runs, batch_ingestions, dataset_versions, dataset_version_inputs,
+  schema_approvals, code_approvals.
 - Nâng cấp DB tạo từ phiên bản cũ (thêm cột mới, chuyển audit_log sang dạng chuỗi băm)
   mà không mất dữ liệu.
 - Cung cấp hàm init_database() cho toàn bộ dự án.
@@ -51,7 +52,24 @@ def get_db_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
     # timeout: dashboard và pipeline có thể cùng ghi một lúc -> chờ khóa thay vì báo lỗi ngay
     conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
+    # WAL: người đọc (dashboard) không chặn người ghi (pipeline); synchronous=NORMAL: mỗi lần commit
+    # không phải ép ghi đĩa ngay -> pipeline ghi hàng nghìn dòng audit / provenance mỗi lần chạy vẫn nhanh
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
+
+
+def backup_database(dich: str, db_path: Optional[str] = None) -> str:
+    """
+    Sao chép metadata.db sang file `dich` bằng API backup của SQLite (an toàn cả khi đang ghi,
+    gồm cả phần còn nằm trong file -wal). Không dùng shutil.copy cho DB ở chế độ WAL.
+    """
+    nguon = get_db_connection(db_path)
+    dich_conn = sqlite3.connect(dich)
+    nguon.backup(dich_conn)
+    dich_conn.close()
+    nguon.close()
+    return dich
 
 
 def _cac_cot(cursor: sqlite3.Cursor, bang: str) -> set:
@@ -136,6 +154,9 @@ def init_database(db_path: Optional[str] = None, seed_sample_data: bool = True) 
         ("file_path", "TEXT DEFAULT ''"),
         ("row_count", "INTEGER"),
         ("updated_at", "TEXT DEFAULT ''"),
+        # Hệ thống nguồn và định dạng gốc (sổ đăng ký nguồn sources/*.yaml), ví dụ 'challenge2012', 'eav_long'
+        ("source_system", "TEXT DEFAULT ''"),
+        ("source_format", "TEXT DEFAULT ''"),
     ])
 
     # 2. Bảng schema_versions: Lưu và so sánh schema các phiên bản
@@ -164,6 +185,9 @@ def init_database(db_path: Optional[str] = None, seed_sample_data: bool = True) 
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """)
+    # DB cũ: cạnh hospitalid -> source_hospital ghi sai (mã viện thật ra lấy từ đường dẫn file, cột _file)
+    cursor.execute("DELETE FROM lineage_edges WHERE source_column = 'hospitalid' "
+                   "AND target_column = 'source_hospital'")
 
     # 4. Bảng violations: Bộ phát hiện vi phạm ghi lỗi chặn
     cursor.execute("""
@@ -183,7 +207,37 @@ def init_database(db_path: Optional[str] = None, seed_sample_data: bool = True) 
     _them_cot_neu_thieu(cursor, "violations", [
         ("run_id", "TEXT DEFAULT ''"),
         ("batch", "TEXT DEFAULT ''"),
+        # Vòng đời: OPEN -> RESOLVED (lô / bảng qua cổng ở lần chạy sau) hoặc SUPERSEDED (lần chạy sau
+        # ghi lại đúng lỗi đó, dòng mới thay thế) - xem governance/violation_engine.update_statuses_after_run
+        ("status", "TEXT NOT NULL DEFAULT 'OPEN'"),
+        ("resolved_at", "TEXT DEFAULT ''"),
+        ("resolved_run_id", "TEXT DEFAULT ''"),
+        ("resolution", "TEXT DEFAULT ''"),
     ])
+
+    # Thay đổi schema đã được kỹ sư dữ liệu DUYỆT: cột `source_column` bệnh viện gửi chính là cột
+    # `target_column` của hợp đồng -> pipeline đổi tên khi đọc, lô qua cổng (governance/schema_registry.py)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS schema_approvals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        table_name TEXT NOT NULL,
+        source_column TEXT NOT NULL,
+        target_column TEXT NOT NULL,
+        approved_by TEXT NOT NULL,
+        reason TEXT DEFAULT '',
+        approved_at TEXT NOT NULL,
+        UNIQUE(table_name, source_column)
+    );
+    """)
+    # Phiên bản code pipeline đã được duyệt là CỐ Ý đổi đầu ra (governance/pipeline_drift.py)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS code_approvals (
+        code_version TEXT PRIMARY KEY,
+        approved_by TEXT NOT NULL,
+        reason TEXT DEFAULT '',
+        approved_at TEXT NOT NULL
+    );
+    """)
 
     # 5. Bảng audit_log: Sổ nhật ký ghi lại mọi hành động (thời gian, ai, làm gì, bảng nào, kết quả)
     _nang_cap_audit_log(conn)
@@ -230,6 +284,16 @@ def init_database(db_path: Optional[str] = None, seed_sample_data: bool = True) 
         created_at TEXT NOT NULL
     );
     """)
+    # Bảng Delta Lake: số phiên bản của bảng trong Delta log (đọc lại đúng phiên bản bằng time travel)
+    _them_cot_neu_thieu(cursor, "dataset_versions", [
+        ("table_version", "INTEGER"),
+        # Phát hiện vi phạm do pipeline đổi code: phiên bản code, dấu vân tay đầu vào, hồ sơ đầu ra
+        ("code_version", "TEXT DEFAULT ''"),
+        ("input_fingerprint", "TEXT DEFAULT ''"),
+        ("profile_json", "TEXT DEFAULT ''"),
+    ])
+    # Ánh xạ cột đã duyệt được áp cho lô (ví dụ 'weight -> admissionweight (#1)')
+    _them_cot_neu_thieu(cursor, "batch_ingestions", [("mapping", "TEXT DEFAULT ''")])
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS dataset_version_inputs (
         version_id INTEGER NOT NULL,
@@ -238,9 +302,22 @@ def init_database(db_path: Optional[str] = None, seed_sample_data: bool = True) 
         PRIMARY KEY (version_id, input_type, input_id)
     );
     """)
+    # Hồ sơ chất lượng đã tính của từng file gửi lên (theo checksum): lần chạy sau file không đổi thì
+    # dùng lại, Spark chỉ phải tính cho file mới / file bị sửa (xử lý tăng dần)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS batch_profiles (
+        checksum TEXT NOT NULL,
+        contract TEXT NOT NULL,
+        profiler_version TEXT NOT NULL,
+        profile_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (checksum, contract, profiler_version)
+    );
+    """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_batch_run ON batch_ingestions(run_id);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_version_table ON dataset_versions(table_name);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_violation_run ON violations(run_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_violation_status ON violations(status);")
 
     conn.commit()
 
@@ -296,7 +373,7 @@ def _seed_default_data_if_empty(cursor: sqlite3.Cursor, conn: sqlite3.Connection
             ("raw_patient_hospital_A", "patientunitstayid", "standardized_patients", "patient_id", "mapping trực tiếp"),
             ("raw_patient_hospital_B", "patientunitstayid", "standardized_patients", "patient_id", "mapping trực tiếp"),
             ("raw_patient_hospital_C", "patientunitstayid", "standardized_patients", "patient_id", "mapping trực tiếp"),
-            ("raw_patient_hospital_B", "admissionweight", "standardized_patients", "weight_kg", "chuẩn hóa đơn vị kg"),
+            ("raw_patient_hospital_B", "admissionweight", "standardized_patients", "weight_kg", "ép số thực, ngoài khoảng hợp lý -> để trống"),
             ("standardized_patients", "patient_id", "ai_ready_icu_mortality", "patient_hash", "giả danh hóa HMAC-SHA256"),
             ("standardized_patients", "weight_kg", "ai_ready_icu_mortality", "weight_kg", "chọn lọc biến đầu vào AI"),
             ("standardized_patients", "age", "ai_ready_icu_mortality", "age", "chuẩn hóa số nguyên"),

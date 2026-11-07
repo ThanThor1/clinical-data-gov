@@ -1,36 +1,74 @@
-# Hai dịch vụ dùng chung một ảnh:
-#   pipeline  : chạy kịch bản demo (hoặc lệnh khác) rồi thoát
+# Các dịch vụ dùng chung một ảnh (Dockerfile):
+#   spark-master, spark-worker-1, spark-worker-2 : cụm Spark standalone (profile "cluster")
+#   pipeline  : chạy kịch bản demo / đánh giá rồi thoát (profile "pipeline")
 #   dashboard : giao diện Streamlit ở http://localhost:8501
 #
 # Cách dùng (từ gốc repo, đã có data/01_landing/{patient,lab,vitalPeriodic}.csv):
 #   CODE_VERSION=$(git describe --always --dirty) docker compose build
-#   docker compose run --rm pipeline                      # python run_demo.py --reset
-#   docker compose run --rm pipeline python run_eval.py   # đánh giá
+#
+#   # a) Spark chạy ngay trong container pipeline (local[*])
+#   docker compose run --rm pipeline
+#
+#   # b) Spark chạy trên cụm 1 master + 2 worker
+#   docker compose --profile cluster up -d                # giao diện master: http://localhost:8080
+#   docker compose run --rm -e SPARK_MASTER=spark://spark-master:7077 pipeline
+#   docker compose --profile cluster down
+#
+#   docker compose run --rm pipeline python run_eval.py  # đánh giá
 #   docker compose up -d dashboard
+x-anh-chung: &anh-chung
+  image: clinical-data-gov:latest
+  build:
+    context: .
+    args:
+      CODE_VERSION: ${CODE_VERSION:-dev}
+  volumes:
+    # Mọi node thấy cùng một thư mục dữ liệu ở cùng một đường dẫn (thay cho HDFS / S3 khi chạy trên một máy)
+    - ./data:/app/data
+    - state:/app/state
+
 services:
+  spark-master:
+    <<: *anh-chung
+    command: ["spark-class", "org.apache.spark.deploy.master.Master",
+              "--host", "spark-master", "--port", "7077", "--webui-port", "8080"]
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080')"]
+    profiles: ["cluster"]
+
+  spark-worker-1: &worker
+    <<: *anh-chung
+    # --work-dir: thư mục mặc định nằm trong site-packages (của root), người dùng app không ghi được
+    command: ["spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077",
+              "--cores", "${SPARK_WORKER_CORES:-2}", "--memory", "${SPARK_WORKER_MEMORY:-1g}",
+              "--work-dir", "/tmp/spark-work"]
+    depends_on:
+      - spark-master
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081')"]
+    profiles: ["cluster"]
+
+  spark-worker-2:
+    <<: *worker
+
   pipeline:
-    build:
-      context: .
-      args:
-        CODE_VERSION: ${CODE_VERSION:-dev}
-    image: clinical-data-gov:latest
+    <<: *anh-chung
     command: ["python", "run_demo.py", "--reset"]
-    volumes:
-      - ./data:/app/data
-      - state:/app/state
+    environment:
+      SPARK_MASTER: ${SPARK_MASTER:-local[*]}
+      # Executor trên worker gọi ngược về driver qua địa chỉ IP của container pipeline
+      SPARK_DRIVER_HOST: auto
+      SPARK_EXECUTOR_MEMORY: ${SPARK_WORKER_MEMORY:-1g}
+    ports:
+      - "4040:4040"
     profiles: ["pipeline"]
 
   dashboard:
-    image: clinical-data-gov:latest
-    build:
-      context: .
-      args:
-        CODE_VERSION: ${CODE_VERSION:-dev}
+    <<: *anh-chung
     ports:
       - "8501:8501"
-    volumes:
-      - ./data:/app/data
-      - state:/app/state
     restart: unless-stopped
 
 volumes:

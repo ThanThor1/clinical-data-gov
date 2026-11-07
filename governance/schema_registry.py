@@ -12,6 +12,11 @@ Các loại thay đổi:
 Lưu ý: ở đây chỉ PHÁT HIỆN thay đổi. Mức độ cuối cùng (BREAKING hay WARNING) do
 governance/gates.py quyết định dựa trên hợp đồng (cột có bắt buộc không, kiểu có hợp không).
 
+Duyệt thay đổi (approve_rename): bệnh viện đổi tên cột là hợp lệ (ví dụ 'weight' chính là 'admissionweight')
+thì kỹ sư dữ liệu duyệt một lần, lưu ở bảng schema_approvals (có audit). Pipeline đổi tên khi đọc file của
+bảng đó (pipeline/standardize.py) nên lô qua cổng, vi phạm cũ chuyển RESOLVED, lineage có thêm cạnh từ cột
+mới - không cần bệnh viện gửi lại dữ liệu.
+
 Chạy thử: python -m governance.schema_registry
 """
 
@@ -22,7 +27,8 @@ from typing import Optional
 import pandas as pd
 from pandas.api import types as ptypes
 
-from catalog_access.init_db import get_db_connection
+from catalog_access.audit import log_event
+from catalog_access.init_db import get_db_connection, now_str
 
 # Hai giá trị trung bình chênh nhau không quá 20% thì coi là "phân phối gần giống"
 NGUONG_LECH_TRUNG_BINH = 0.20
@@ -60,11 +66,15 @@ def type_family(kieu: str) -> str:
     return "number" if kieu in ("int", "float") else kieu
 
 
-def profile_dataframe(df: pd.DataFrame) -> dict:
+def profile_dataframe(df) -> dict:
     """
     Mô tả từng cột: kiểu logic, % ô rỗng, và giá trị trung bình nếu là cột số.
     Kết quả này được lưu vào schema_versions.columns_json.
+    `df` là DataFrame pandas, hoặc hồ sơ đã tính sẵn (governance/profiling.py, ví dụ bằng Spark).
     """
+    if isinstance(df, dict):
+        return {ten: {k: tt[k] for k in ("type", "null_pct", "mean") if k in tt}
+                for ten, tt in df["cot"].items()}
     mo_ta = {}
     for ten_cot in df.columns:
         cot = df[ten_cot]
@@ -246,11 +256,12 @@ def get_schema_history(table_name: str, db_path: Optional[str] = None) -> list[d
     return [dict(d) for d in dong]
 
 
-def register_schema(table_name: str, df: pd.DataFrame, db_path: Optional[str] = None,
+def register_schema(table_name: str, df, db_path: Optional[str] = None,
                     save: bool = True) -> dict:
     """
     Ghi nhận schema của `df` cho bảng `table_name` và so với phiên bản CHUẨN
     (phiên bản hợp lệ gần nhất, xem get_baseline_schema).
+    `df`: DataFrame pandas hoặc hồ sơ dữ liệu (governance/profiling.py).
 
     - Lần đầu: tạo version 1 (change_type = 'INITIAL').
     - Schema khác phiên bản mới nhất trong DB: tạo version mới = version mới nhất + 1.
@@ -298,6 +309,52 @@ def register_schema(table_name: str, df: pd.DataFrame, db_path: Optional[str] = 
         "change_type": tom_tat,
         "is_new_version": co_version_moi,
     }
+
+
+# ---------------------------------------------------------------------------
+# 4. Duyệt thay đổi schema (đổi tên cột)
+# ---------------------------------------------------------------------------
+
+def approve_rename(nguoi_duyet: str, table_name: str, cot_nguon: str, cot_dich: str, ly_do: str = "",
+                   db_path: Optional[str] = None) -> int:
+    """
+    Duyệt: cột `cot_nguon` bệnh viện gửi trong bảng `table_name` chính là cột `cot_dich` của hợp đồng.
+    Chỉ tài khoản có quyền GHI bảng đó mới được duyệt (catalog_access.require_access: kiểm tra + ghi audit,
+    không có quyền thì ném AccessDenied). Duyệt lại cùng cột thì cập nhật. Trả về id lần duyệt.
+    """
+    from catalog_access.access import require_access
+    from governance.contracts import find_contract
+
+    hop_dong = find_contract(table_name)
+    if not hop_dong or cot_dich not in hop_dong["columns"]:
+        raise ValueError(f"'{cot_dich}' không phải cột trong hợp đồng của bảng {table_name}")
+    if cot_nguon in hop_dong["columns"]:
+        raise ValueError(f"'{cot_nguon}' đã là cột của hợp đồng, không phải tên mới cần duyệt")
+    require_access(nguoi_duyet, table_name, "write", db_path=db_path)
+    conn = get_db_connection(db_path)
+    conn.execute(
+        "INSERT INTO schema_approvals (table_name, source_column, target_column, approved_by, reason, approved_at) "
+        "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(table_name, source_column) DO UPDATE SET "
+        "target_column = excluded.target_column, approved_by = excluded.approved_by, "
+        "reason = excluded.reason, approved_at = excluded.approved_at",
+        (table_name, cot_nguon, cot_dich, nguoi_duyet, ly_do, now_str()))
+    ma = conn.execute("SELECT id FROM schema_approvals WHERE table_name = ? AND source_column = ?",
+                      (table_name, cot_nguon)).fetchone()["id"]
+    conn.commit()
+    conn.close()
+    log_event(ai=nguoi_duyet, hanh_dong=f"approve_rename:{cot_nguon}->{cot_dich}", bang=table_name,
+              ket_qua="SUCCESS", db_path=db_path)
+    return ma
+
+
+def get_schema_approvals(table_name: Optional[str] = None, db_path: Optional[str] = None) -> list[dict]:
+    """Các lần duyệt đổi tên cột (của một bảng, hoặc mọi bảng), cũ trước."""
+    conn = get_db_connection(db_path)
+    dong = conn.execute(
+        "SELECT * FROM schema_approvals" + (" WHERE table_name = ?" if table_name else "") + " ORDER BY id",
+        (table_name,) if table_name else ()).fetchall()
+    conn.close()
+    return [dict(d) for d in dong]
 
 
 if __name__ == "__main__":

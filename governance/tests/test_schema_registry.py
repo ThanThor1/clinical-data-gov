@@ -3,6 +3,7 @@
 import json
 
 import pandas as pd
+import pytest
 
 from catalog_access.init_db import get_db_connection
 from governance.sample_data import make_patient, make_vital
@@ -151,3 +152,40 @@ def test_compare_schemas_thuan():
     cu = {"a": {"type": "int"}, "b": {"type": "string"}}
     moi = {"a": {"type": "string"}, "b": {"type": "string"}}
     assert [t["change_type"] for t in compare_schemas(cu, moi)] == ["TYPE_CHANGED"]
+
+
+# ---------------------------------------------------------------------------
+# Duyệt thay đổi schema (đổi tên cột)
+# ---------------------------------------------------------------------------
+
+def test_duyet_doi_ten_cot_va_ghi_audit(db_path):
+    from catalog_access import get_audit_logs
+    from governance.schema_registry import approve_rename, get_schema_approvals
+
+    ma = approve_rename("engineer_alice", "raw_patient_hospital_B", "weight", "admissionweight", "đổi tên hợp lệ",
+                        db_path)
+    assert [(a["id"], a["source_column"], a["target_column"], a["approved_by"])
+            for a in get_schema_approvals("raw_patient_hospital_B", db_path)] == [
+        (ma, "weight", "admissionweight", "engineer_alice")]
+    assert [(d["lam_gi"], d["ket_qua"]) for d in get_audit_logs(db_path=db_path)] == [
+        ("approve_rename:weight->admissionweight", "SUCCESS"), ("write:raw", "ALLOWED")]
+    # Duyệt lại cùng cột thì cập nhật, không thêm dòng
+    assert approve_rename("engineer_alice", "raw_patient_hospital_B", "weight", "admissionweight", db_path=db_path) == ma
+    assert len(get_schema_approvals(db_path=db_path)) == 1
+
+
+def test_khong_co_quyen_ghi_thi_khong_duoc_duyet(db_path):
+    from catalog_access import AccessDenied
+    from governance.schema_registry import approve_rename, get_schema_approvals
+
+    with pytest.raises(AccessDenied):
+        approve_rename("analyst_dave", "raw_patient_hospital_B", "weight", "admissionweight", db_path=db_path)
+    assert get_schema_approvals(db_path=db_path) == []
+
+
+@pytest.mark.parametrize("cot_nguon, cot_dich", [("weight", "khong_co_cot_nay"), ("gender", "admissionweight")])
+def test_duyet_sai_cot_bi_tu_choi(db_path, cot_nguon, cot_dich):
+    from governance.schema_registry import approve_rename
+
+    with pytest.raises(ValueError):
+        approve_rename("engineer_alice", "raw_patient_hospital_B", cot_nguon, cot_dich, db_path=db_path)

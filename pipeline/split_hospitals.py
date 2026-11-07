@@ -1,5 +1,21 @@
-import pandas as pd
+"""
+Mô phỏng nhiều bệnh viện: tách dữ liệu eICU demo (data/01_landing) thành từng bệnh viện
+-> data/02_staging/hospital_<hospitalid>/{patient,lab,vitalPeriodic}.csv
+
+Mặc định lấy TẤT CẢ bệnh viện (eICU demo có 186 viện, 2.520 bệnh nhân, khoảng 2 triệu dòng).
+Đây là bước giả lập phía bệnh viện (nằm ngoài hệ thống governance) nên dùng pandas cho đơn giản.
+
+Chạy:
+    python -m pipeline.split_hospitals            # mọi bệnh viện
+    python -m pipeline.split_hospitals --top 3    # chỉ 3 viện đông bệnh nhân nhất
+"""
+
+import argparse
+import glob
 import os
+import shutil
+
+import pandas as pd
 
 ROOT = os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))
@@ -13,45 +29,53 @@ LAB_DATA_ORIGINAL = os.path.join(LANDING_DIR, "lab.csv")
 PATIENT_DATA_ORIGINAL = os.path.join(LANDING_DIR, "patient.csv")
 VITAL_PERIODIC_DATA_ORIGINAL = os.path.join(LANDING_DIR, "vitalPeriodic.csv")
 
-HOSPITAL_NAMES = ["hospital_A", "hospital_B", "hospital_C"]
 
+def main(top=None, landing_dir=None, staging_dir=None):
+    """
+    Tách dữ liệu theo bệnh viện. top=None: mọi viện; top=k: k viện đông bệnh nhân nhất.
+    Trả về danh sách hospitalid đã tách (đông bệnh nhân trước).
+    """
+    landing_dir = landing_dir or LANDING_DIR
+    staging_dir = staging_dir or STAGING_DIR
 
-def main():
     # BƯỚC 1: Đọc dữ liệu ban đầu
-    patient_df = pd.read_csv(PATIENT_DATA_ORIGINAL)
-    lab_df = pd.read_csv(LAB_DATA_ORIGINAL)
-    vitalPeriodic_df = pd.read_csv(VITAL_PERIODIC_DATA_ORIGINAL)
+    patient_df = pd.read_csv(os.path.join(landing_dir, "patient.csv"))
+    lab_df = pd.read_csv(os.path.join(landing_dir, "lab.csv"))
+    vitalPeriodic_df = pd.read_csv(os.path.join(landing_dir, "vitalPeriodic.csv"))
 
-    # BƯỚC 2: Tìm 3 bệnh viện đông bệnh nhân nhất
-    top_3_hospital_ids = patient_df["hospitalid"].value_counts().head(3).index.tolist()
-    print("Ba bệnh viên đông bệnh nhân nhất: ", top_3_hospital_ids)
+    # BƯỚC 2: Chọn bệnh viện (đông bệnh nhân trước; cùng số bệnh nhân thì mã nhỏ trước)
+    so_benh_nhan = patient_df["hospitalid"].value_counts()
+    cac_vien = sorted(so_benh_nhan.index, key=lambda h: (-so_benh_nhan[h], h))
+    if top:
+        cac_vien = cac_vien[:top]
+    print(f"Tách {len(cac_vien)} bệnh viện, {int(so_benh_nhan[cac_vien].sum())} bệnh nhân")
 
-    # BƯỚC 3: Lặp qua từng bệnh viện và tách dữ liệu
-    for hospital_id, hospital_name in zip(top_3_hospital_ids, HOSPITAL_NAMES):
-        print(f"\n--- Đang xử lý {hospital_name} (ID: {hospital_id}) ---")
+    # BƯỚC 3: Xóa kết quả tách cũ (có thể khác số viện) rồi ghi lại
+    for cu in glob.glob(os.path.join(staging_dir, "hospital_*")):
+        shutil.rmtree(cu)
 
-        target_dir = os.path.join(STAGING_DIR, hospital_name)
+    # Gắn mã viện cho từng dòng lab / vital qua patientunitstayid, rồi gom nhóm MỘT lần
+    vien_cua_bn = patient_df.set_index("patientunitstayid")["hospitalid"]
+    nhom = {
+        "patient.csv": patient_df.groupby("hospitalid"),
+        "lab.csv": lab_df.groupby(lab_df["patientunitstayid"].map(vien_cua_bn)),
+        "vitalPeriodic.csv": vitalPeriodic_df.groupby(vitalPeriodic_df["patientunitstayid"].map(vien_cua_bn)),
+    }
+    cot_goc = {"patient.csv": patient_df.columns, "lab.csv": lab_df.columns,
+               "vitalPeriodic.csv": vitalPeriodic_df.columns}
+    for hospital_id in cac_vien:
+        target_dir = os.path.join(staging_dir, f"hospital_{hospital_id}")
         os.makedirs(target_dir, exist_ok=True)
+        for ten_file, gom in nhom.items():
+            # Viện không có dòng nào (ví dụ không đo sinh hiệu) vẫn có file, chỉ có dòng tiêu đề
+            phan = gom.get_group(hospital_id) if hospital_id in gom.groups else pd.DataFrame(columns=cot_goc[ten_file])
+            phan.to_csv(os.path.join(target_dir, ten_file), index=False)
 
-        # 3.2. Lọc bảng patient của bệnh viện này
-        patient_subset = patient_df[patient_df["hospitalid"] == hospital_id]
-
-        # 3.3. Lấy danh sách các patientunitstayid của bệnh viện này
-        valid_stay_ids = patient_subset["patientunitstayid"].unique()
-
-        # 3.4. Lọc bảng lab và vital dựa trên valid_stay_ids
-        lab_subset = lab_df[lab_df["patientunitstayid"].isin(valid_stay_ids)]
-        vital_subset = vitalPeriodic_df[vitalPeriodic_df["patientunitstayid"].isin(valid_stay_ids)]
-
-        # 3.5. Lưu 3 file ra thư mục staging
-        patient_subset.to_csv(os.path.join(target_dir, "patient.csv"), index=False)
-        lab_subset.to_csv(os.path.join(target_dir, "lab.csv"), index=False)
-        vital_subset.to_csv(os.path.join(target_dir, "vitalPeriodic.csv"), index=False)
-
-        print(f"✅ Đã lưu dữ liệu {hospital_id} vào {target_dir}")
-
-    print("\n🎉 Hoàn tất tách dữ liệu!")
+    print(f"✅ Đã lưu {len(cac_vien)} bệnh viện vào {staging_dir}")
+    return [str(h) for h in cac_vien]
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Tách dữ liệu eICU demo theo bệnh viện")
+    parser.add_argument("--top", type=int, help="chỉ lấy k bệnh viện đông bệnh nhân nhất")
+    main(parser.parse_args().top)

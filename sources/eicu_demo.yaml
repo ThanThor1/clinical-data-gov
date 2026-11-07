@@ -1,0 +1,18 @@
+# Sổ đăng ký nguồn dữ liệu (governance/sources.py): mỗi file mô tả MỘT hệ thống nguồn - định dạng gốc,
+# giấy phép, viện nào thuộc nguồn này, và cách ánh xạ về SCHEMA CHUẨN của tầng raw (contracts/raw_*.yaml).
+# Đổi file này là đổi phiên bản code pipeline (governance/provenance.get_code_version).
+#
+# eICU là nguồn mặc định: schema chuẩn lấy đúng tên cột của eICU nên không cần ánh xạ.
+
+name: eicu_demo
+system: eICU-CRD Demo 2.0.1 (Philips eICU, 186 bệnh viện ở Mỹ)
+format: csv_wide                  # mỗi đợt 3 file CSV dạng bảng: patient, lab, vitalPeriodic
+description: Mỗi bệnh viện gửi 3 file CSV với đúng tên cột của schema chuẩn
+license: ODbL 1.0
+url: https://physionet.org/content/eicu-crd-demo/2.0.1/
+landing: data/01_landing          # patient.csv, lab.csv, vitalPeriodic.csv (pipeline/split_hospitals.py)
+hospitals: default                # mọi viện không được nguồn khác nhận
+
+# Định nghĩa của các cột có thể hiểu khác nhau giữa các nguồn (so với `semantics` trong hợp đồng)
+semantics:
+  unitdischargestatus: icu_discharge_status   # tình trạng lúc RA KHỎI ICU

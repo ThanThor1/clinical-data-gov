@@ -60,20 +60,23 @@ def sensitive_column_names(contracts_dir: Optional[str] = None) -> set[str]:
             for ten, luat in hd["columns"].items() if luat.get("sensitive")}
 
 
-def check_privacy(ten_bang: str, df: pd.DataFrame, hop_dong: dict,
+def check_privacy(ten_bang: str, cac_cot, hop_dong: dict,
                   contracts_dir: Optional[str] = None) -> list[dict]:
     """
     Kiểm tra quyền riêng tư cho bảng tầng AI-ready. Bảng tầng khác -> không kiểm tra.
+    cac_cot: danh sách tên cột (hoặc một DataFrame pandas).
     Trả về danh sách vấn đề (dict: error_type, column, message, observed, expected),
     gates.py gắn mức độ BREAKING cho tất cả.
     """
     if not hop_dong or hop_dong.get("tier") != "ai_ready":
         return []
+    if isinstance(cac_cot, pd.DataFrame):
+        cac_cot = list(cac_cot.columns)
 
     van_de = []
     nhay_cam = sensitive_column_names(contracts_dir)
     khai_bao = set(hop_dong["columns"])
-    for cot in df.columns:
+    for cot in cac_cot:
         if cot in nhay_cam:
             van_de.append({
                 "error_type": "PRIVACY_SENSITIVE_COLUMN", "column": cot,
@@ -95,3 +98,35 @@ if __name__ == "__main__":
     print("HMAC-SHA256('141234')   :", pseudonymize_id(141234, khoa_thu))
     print("SHA-256 thường('141234'):", hashlib.sha256(b"141234").hexdigest(), "<- ai cũng tính lại được")
     print("Cột định danh theo hợp đồng:", sorted(sensitive_column_names()))
+
+
+def pseudonymize_spark(sdf, cot_nguon: str = "patient_id", cot_dich: str = "patient_hash",
+                       secret: Optional[bytes] = None):
+    """
+    Thêm cột `cot_dich` = HMAC-SHA256(khóa, `cot_nguon`) vào DataFrame Spark, cho kết quả trùng khớp
+    pseudonymize_id. Viết bằng hàm có sẵn của Spark (sha2, unhex, concat) theo RFC 2104:
+        HMAC(K, m) = SHA256((K' xor opad) || SHA256((K' xor ipad) || m))
+    -> chạy trong JVM của executor, không cần UDF Python.
+
+    Khóa (đã XOR với ipad / opad) KHÔNG được viết thành hằng số trong biểu thức: hằng số nằm trong kế hoạch
+    truy vấn và hiện lên giao diện Spark UI (cổng 4040), ai xem được UI là suy ra được khóa. Thay vào đó
+    khóa đi vào job qua một bảng 1 dòng ghép bằng broadcast join; kế hoạch chỉ ghi tên cột.
+    """
+    from pyspark.sql import functions as F
+
+    khoa = secret if secret is not None else get_secret()
+    if len(khoa) > 64:                    # khóa dài hơn khối 64 byte thì băm trước (RFC 2104)
+        khoa = hashlib.sha256(khoa).digest()
+    khoa = khoa.ljust(64, b"\0")
+    # Đúng 1 phân vùng: dữ liệu cục bộ đi vào JVM qua Python worker, mặc định chia theo số core
+    # (local[*] 12 core -> 12 tiến trình Python, gần 1 GB RAM chỉ để chuyển 1 dòng khóa)
+    phien = sdf.sparkSession
+    bang_khoa = phien.createDataFrame(
+        phien.sparkContext.parallelize([(bytes(b ^ 0x36 for b in khoa), bytes(b ^ 0x5C for b in khoa))], 1),
+        "_ipad binary, _opad binary")
+
+    thong_diep = F.encode(F.trim(F.col(cot_nguon).cast("string")), "UTF-8")
+    trong = F.unhex(F.sha2(F.concat(F.col("_ipad"), thong_diep), 256))
+    return (sdf.crossJoin(F.broadcast(bang_khoa))
+            .withColumn(cot_dich, F.sha2(F.concat(F.col("_opad"), trong), 256))
+            .drop("_ipad", "_opad"))

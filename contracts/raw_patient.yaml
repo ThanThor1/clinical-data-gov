@@ -10,14 +10,20 @@
 #   allowed_values : tập giá trị cho phép (chỉ BREAKING khi > 1% số dòng sai)
 #   pattern        : biểu thức chính quy giá trị phải khớp (chỉ BREAKING khi > 1% số dòng sai)
 #   sensitive      : cột nhạy cảm (định danh bệnh nhân) -> phải giả danh hóa trước tầng AI-ready
+#   semantics      : ĐỊNH NGHĨA của cột; nguồn nào khai báo khác (sources/*.yaml) -> cảnh báo SEMANTIC_MISMATCH
 #   description    : mô tả cột, hiển thị trong catalog
+#
+# Đây cũng là SCHEMA CHUẨN của tầng raw: nguồn có định dạng khác (ví dụ Challenge 2012) được bộ chuyển
+# (pipeline/source_adapters.py) ánh xạ về đúng các cột này theo sổ đăng ký nguồn sources/*.yaml.
+# v1.1: hospitalid không còn bắt buộc (chỉ eICU có; nguồn của lô lấy từ đường dẫn gửi lên),
+#       thêm semantics cho unitdischargestatus
 
 name: raw_patient
-description: Bảng bệnh nhân thô, giữ nguyên định dạng gốc của eICU
+description: Bảng bệnh nhân thô theo schema chuẩn (tên cột của eICU)
 applies_to:
   - raw_patient_hospital_*
 owner: Đội IT bệnh viện nguồn
-version: "1.0"
+version: "1.1"
 tier: raw
 
 columns:
@@ -38,11 +44,11 @@ columns:
 
   hospitalid:
     type: int
-    required: true
+    required: false
     nullable: false
     max_null_pct: 0
     sensitive: false
-    description: Mã bệnh viện trong eICU
+    description: Mã bệnh viện trong eICU (nguồn khác có thể không có)
 
   # age trong eICU là CHUỖI: có thể là "45", "> 89" hoặc rỗng -> không đặt min/max ở tầng raw
   age:
@@ -84,4 +90,5 @@ columns:
     max_null_pct: 30
     allowed_values: [Alive, Expired]
     sensitive: false
+    semantics: icu_discharge_status
     description: Tình trạng lúc ra khỏi ICU (Alive / Expired)

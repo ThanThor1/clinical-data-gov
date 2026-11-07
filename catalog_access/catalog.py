@@ -28,7 +28,7 @@ from catalog_access.init_db import get_db_connection, now_str
 from catalog_access.audit import log_event
 
 COT_CATALOG = ("id, name, hospital, tier, owner, sensitive_columns, description, contract, "
-               "file_path, row_count, created_at, updated_at")
+               "file_path, row_count, created_at, updated_at, source_system, source_format")
 
 
 def register_dataset(
@@ -42,7 +42,9 @@ def register_dataset(
     description: str = "",
     contract: str = "",
     file_path: str = "",
-    row_count: Optional[int] = None
+    row_count: Optional[int] = None,
+    source_system: str = "",
+    source_format: str = ""
 ) -> int:
     """
     Đăng ký một bảng dữ liệu vào danh bạ Metadata Catalog theo đúng chuẩn đề tài.
@@ -58,6 +60,7 @@ def register_dataset(
         contract (str): Hợp đồng áp dụng, ví dụ 'raw_patient v1.0'.
         file_path (str): Vị trí file, tương đối với gốc repo; bảng raw nhiều đợt dùng mẫu '*'.
         row_count (int): Số dòng hiện tại.
+        source_system, source_format (str): Hệ thống nguồn và định dạng gốc (sổ đăng ký sources/*.yaml).
     Khác:
         registered_by (str): Người thực hiện đăng ký (để ghi audit log).
         db_path (str, optional): Đường dẫn tới metadata.db.
@@ -74,8 +77,8 @@ def register_dataset(
 
     cursor.execute("""
     INSERT INTO datasets (name, hospital, tier, owner, sensitive_columns,
-                          description, contract, file_path, row_count, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          description, contract, file_path, row_count, updated_at, source_system, source_format)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(name) DO UPDATE SET
         hospital = excluded.hospital,
         tier = excluded.tier,
@@ -85,9 +88,12 @@ def register_dataset(
         contract = COALESCE(NULLIF(excluded.contract, ''), datasets.contract),
         file_path = COALESCE(NULLIF(excluded.file_path, ''), datasets.file_path),
         row_count = COALESCE(excluded.row_count, datasets.row_count),
-        updated_at = excluded.updated_at;
+        updated_at = excluded.updated_at,
+        source_system = COALESCE(NULLIF(excluded.source_system, ''), datasets.source_system),
+        source_format = COALESCE(NULLIF(excluded.source_format, ''), datasets.source_format);
     """, (name.strip(), hospital.strip(), tier_clean, owner.strip(), sensitive_columns.strip(),
-          description.strip(), contract.strip(), file_path.strip(), row_count, now_str()))
+          description.strip(), contract.strip(), file_path.strip(), row_count, now_str(),
+          source_system.strip(), source_format.strip()))
 
     # lastrowid không đáng tin khi câu lệnh rơi vào nhánh UPDATE -> tra lại id theo tên
     dataset_id = cursor.execute("SELECT id FROM datasets WHERE name = ?;", (name.strip(),)).fetchone()["id"]

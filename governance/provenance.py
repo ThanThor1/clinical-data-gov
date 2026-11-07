@@ -10,8 +10,10 @@ Provenance trả lời "phiên bản bảng AI-ready này được tạo từ nh
                một phiên bản bảng đầu ra    -> dataset_versions  (file, checksum, số dòng)
     Quan hệ  : phiên bản được tạo từ lô / phiên bản nào -> dataset_version_inputs
 
-Checksum giúp phát hiện file bị sửa ngoài pipeline: verify_input() chặn việc dùng một file
+Checksum giúp phát hiện file bị sửa ngoài pipeline: verify_input() chặn việc dùng một bảng
 standardized không khớp với bất kỳ phiên bản nào pipeline đã ghi (vi phạm PROVENANCE_UNVERIFIED).
+Với bảng Delta Lake: checksum tính trên các file Parquet của đúng một phiên bản trong Delta log và
+lưu kèm số phiên bản (table_version) -> kiểm tra lại được cả phiên bản cũ nhờ time travel.
 
 Cách dùng trong pipeline:
     with pipeline_run("pipeline_service", "chuẩn hóa") as run_id:
@@ -23,19 +25,26 @@ Cách dùng trong pipeline:
 Chạy thử: python -m governance.provenance   (in provenance của bảng AI-ready mới nhất)
 """
 
+import glob
 import hashlib
+import json
 import os
 import secrets
 import subprocess
 from contextlib import contextmanager
 from datetime import datetime
+from functools import lru_cache
 from typing import Optional
+from urllib.parse import unquote, urlparse
 
 from catalog_access import audit_context, get_audit_context, log_event
-from catalog_access.data_access import from_catalog_path, to_catalog_path
+from catalog_access.data_access import from_catalog_path, is_delta_table, to_catalog_path
 from catalog_access.init_db import get_db_connection, now_str
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+# Mã nguồn quyết định đầu ra của pipeline (đổi file nào là phiên bản code đổi)
+MA_NGUON_PIPELINE = ("pipeline/*.py", "governance/*.py", "sources/*.yaml")
 
 
 # ---------------------------------------------------------------------------
@@ -51,11 +60,44 @@ def file_checksum(duong_dan: str) -> str:
     return bam.hexdigest()
 
 
-def get_code_version() -> str:
+def _bam_danh_sach(thu_muc: str, cac_file) -> str:
+    """Checksum của một tập file: SHA-256 của các dòng 'đường_dẫn_tương_đối:sha256' đã sắp xếp."""
+    bam = hashlib.sha256()
+    for ten in sorted(cac_file):
+        bam.update(f"{ten}:{file_checksum(os.path.join(thu_muc, ten))}\n".encode("utf-8"))
+    return bam.hexdigest()
+
+
+def delta_version(duong_dan: str) -> Optional[int]:
+    """Phiên bản hiện tại của bảng Delta (None nếu không phải bảng Delta)."""
+    if not is_delta_table(duong_dan):
+        return None
+    from deltalake import DeltaTable
+    return DeltaTable(duong_dan).version()
+
+
+def path_checksum(duong_dan: str, version: Optional[int] = None) -> str:
     """
-    Phiên bản code đang chạy: git describe (thêm '-dirty' nếu có thay đổi chưa commit).
-    Không có git (ví dụ trong container) -> lấy biến môi trường CODE_VERSION.
+    Checksum của một file, hoặc của một bảng:
+      - bảng Delta : các file Parquet thuộc phiên bản `version` (mặc định phiên bản hiện tại)
+      - thư mục khác (Parquet): mọi file dữ liệu trong thư mục (bỏ file ẩn / file bắt đầu bằng '_')
     """
+    if os.path.isfile(duong_dan):
+        return file_checksum(duong_dan)
+    if is_delta_table(duong_dan):
+        from deltalake import DeltaTable
+        cac_uri = DeltaTable(duong_dan, version=version).file_uris()
+        return _bam_danh_sach(duong_dan, [os.path.relpath(unquote(urlparse(u).path), duong_dan) for u in cac_uri])
+    cac_file = []
+    for goc, thu_muc_con, ten_file in os.walk(duong_dan):
+        thu_muc_con[:] = [d for d in thu_muc_con if not d.startswith(("_", "."))]
+        cac_file += [os.path.relpath(os.path.join(goc, f), duong_dan) for f in ten_file
+                     if not f.startswith(("_", "."))]
+    return _bam_danh_sach(duong_dan, cac_file)
+
+
+@lru_cache(maxsize=1)
+def _git_describe() -> str:
     try:
         ket_qua = subprocess.run(["git", "describe", "--always", "--dirty"], cwd=ROOT,
                                  capture_output=True, text=True, timeout=5)
@@ -64,6 +106,31 @@ def get_code_version() -> str:
     except (OSError, subprocess.SubprocessError):
         pass
     return os.environ.get("CODE_VERSION", "")
+
+
+@lru_cache(maxsize=1)
+def source_hash() -> str:
+    """SHA-256 (12 ký tự đầu) nội dung mã nguồn quyết định đầu ra: pipeline/*.py, governance/*.py, sources/*.yaml."""
+    bam = hashlib.sha256()
+    for mau in MA_NGUON_PIPELINE:
+        for duong_dan in sorted(glob.glob(os.path.join(ROOT, mau))):
+            bam.update(os.path.relpath(duong_dan, ROOT).encode())
+            with open(duong_dan, "rb") as f:
+                bam.update(f.read())
+    return bam.hexdigest()[:12]
+
+
+def get_code_version() -> str:
+    """
+    Phiên bản code đang chạy: '<git describe>+src.<băm mã nguồn>', ví dụ '5b38172-dirty+src.3fa1c09b2e7d'.
+    git describe chỉ thêm '-dirty' (không đổi khi sửa tiếp code chưa commit) nên kèm băm NỘI DUNG mã nguồn:
+    sửa một dòng code pipeline là phiên bản đổi. Không có git (ví dụ trong container) -> biến môi trường CODE_VERSION.
+    Đang bật lỗi pipeline giả lập (PIPELINE_LOI_GIA_LAP, xem pipeline/inject_errors.py) -> thêm '+loi.<tên lỗi>',
+    vì code chạy thật lúc đó khác code gốc.
+    """
+    phien_ban = f"{_git_describe() or 'khong-git'}+src.{source_hash()}"
+    loi = os.environ.get("PIPELINE_LOI_GIA_LAP", "")
+    return phien_ban + (f"+loi.{loi}" if loi else "")
 
 
 def current_run_id() -> str:
@@ -109,8 +176,15 @@ def _tinh_trang_thai(run_id: str, db_path: Optional[str]) -> str:
 
 
 def finish_run(run_id: str, status: Optional[str] = None, db_path: Optional[str] = None) -> str:
-    """Đóng lần chạy. status=None -> tự tính từ đầu ra và vi phạm của lần chạy. Trả về trạng thái."""
+    """
+    Đóng lần chạy. status=None -> tự tính từ đầu ra và vi phạm của lần chạy. Trả về trạng thái.
+    Lần chạy không lỗi bất ngờ thì cập nhật trạng thái các vi phạm cũ (RESOLVED / SUPERSEDED).
+    """
+    from governance.violation_engine import update_statuses_after_run
+
     trang_thai = status or _tinh_trang_thai(run_id, db_path)
+    if trang_thai != "FAILED":
+        update_statuses_after_run(run_id, db_path)
     conn = get_db_connection(db_path)
     dong = conn.execute("SELECT actor FROM pipeline_runs WHERE run_id = ?", (run_id,)).fetchone()
     conn.execute("UPDATE pipeline_runs SET finished_at = ?, status = ? WHERE run_id = ?",
@@ -155,18 +229,23 @@ def batch_context(batch: str):
 
 def record_batch(table_name: str, hospital: str, batch: str, source_file: str, row_count: int,
                  status: str, schema_version: Optional[int] = None, contract: str = "",
-                 run_id: Optional[str] = None, db_path: Optional[str] = None) -> int:
+                 run_id: Optional[str] = None, db_path: Optional[str] = None,
+                 checksum: Optional[str] = None, mapping: str = "") -> int:
     """
     Ghi provenance của một lô: file nguồn, checksum, số dòng, phiên bản schema, hợp đồng áp dụng,
     kết quả (ACCEPTED: qua cả 2 cổng | BLOCKED: bị chặn | SKIPPED: bỏ qua vì bảng patient cùng đợt bị chặn).
+    checksum: SHA-256 của file nếu bên gọi đã tính sẵn (không truyền thì tự tính).
+    mapping : đổi tên cột đã duyệt được áp khi đọc lô (ví dụ 'weight -> admissionweight (#1)').
     Trả về id của lô.
     """
     conn = get_db_connection(db_path)
     con_tro = conn.execute(
         "INSERT INTO batch_ingestions (run_id, table_name, hospital, batch, source_file, checksum, "
-        "row_count, schema_version, contract, status, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "row_count, schema_version, contract, status, recorded_at, mapping) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (run_id or current_run_id(), table_name, hospital, batch, to_catalog_path(source_file),
-         file_checksum(source_file), int(row_count), schema_version, contract, status, now_str()),
+         checksum or file_checksum(source_file), int(row_count), schema_version, contract, status, now_str(),
+         mapping),
     )
     ma = con_tro.lastrowid
     conn.commit()
@@ -174,19 +253,45 @@ def record_batch(table_name: str, hospital: str, batch: str, source_file: str, r
     return ma
 
 
+def input_fingerprint(inputs: list[tuple[str, int]], db_path: Optional[str] = None) -> str:
+    """
+    Dấu vân tay của tập đầu vào theo các LÔ RAW gốc (đi ngược qua các phiên bản trung gian) và NỘI DUNG của
+    chúng (checksum), không theo id. Không lấy checksum của phiên bản trung gian vì mỗi lần ghi lại, Delta tạo
+    file Parquet mới (checksum đổi) dù dữ liệu y hệt. Dùng để biết hai phiên bản có cùng đầu vào không.
+    """
+    lo = []
+    for loai, ma in inputs:
+        if loai == "dataset_version":
+            lo += source_batches(int(ma), db_path)
+        else:
+            lo += _truy_van("SELECT * FROM batch_ingestions WHERE id = ?", (int(ma),), db_path)
+    phan = sorted({f"{b['table_name']}:{b['checksum']}" for b in lo})
+    return hashlib.sha256("\n".join(phan).encode()).hexdigest()
+
+
+def tom_tat_ho_so(ho_so: dict) -> dict:
+    """Phần hồ sơ đầu ra lưu kèm phiên bản: số dòng; kiểu, % trống, trung bình của từng cột."""
+    return {"so_dong": ho_so["so_dong"],
+            "cot": {ten: {k: tt[k] for k in ("type", "null_pct", "mean") if k in tt} for ten, tt in ho_so["cot"].items()}}
+
+
 def record_dataset_version(table_name: str, tier: str, file_path: str, row_count: int,
                            inputs: list[tuple[str, int]], run_id: Optional[str] = None,
-                           db_path: Optional[str] = None) -> int:
+                           db_path: Optional[str] = None, ho_so: Optional[dict] = None) -> int:
     """
-    Ghi một phiên bản bảng đầu ra vừa được tạo (file đã ghi xong) và các đầu vào của nó:
+    Ghi một phiên bản bảng đầu ra vừa được tạo (file / bảng Delta đã ghi xong) và các đầu vào của nó:
     inputs = [("batch", id_lô), ("dataset_version", id_phiên_bản), ...]. Trả về id phiên bản.
+    Lưu kèm phiên bản code, dấu vân tay đầu vào và (nếu có) hồ sơ đầu ra -> governance/pipeline_drift.py
+    so được lần chạy sau với lần này.
     """
     conn = get_db_connection(db_path)
     con_tro = conn.execute(
-        "INSERT INTO dataset_versions (run_id, table_name, tier, file_path, checksum, row_count, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO dataset_versions (run_id, table_name, tier, file_path, checksum, row_count, created_at, "
+        "table_version, code_version, input_fingerprint, profile_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (run_id or current_run_id(), table_name, tier, to_catalog_path(file_path),
-         file_checksum(file_path), int(row_count), now_str()),
+         path_checksum(file_path), int(row_count), now_str(), delta_version(file_path), get_code_version(),
+         input_fingerprint(inputs, db_path),
+         json.dumps(tom_tat_ho_so(ho_so), ensure_ascii=False) if ho_so else ""),
     )
     ma = con_tro.lastrowid
     conn.executemany(
@@ -218,13 +323,13 @@ def verify_input(table_name: str, duong_dan: str, db_path: Optional[str] = None)
     """
     from governance.violation_engine import report_violation
 
-    checksum = file_checksum(duong_dan)
+    checksum = path_checksum(duong_dan)
     phien_ban = find_version_by_checksum(table_name, checksum, db_path)
     if phien_ban:
         return phien_ban["id"]
     report_violation(
         "PROVENANCE_UNVERIFIED", "BREAKING", table_name,
-        f"File {to_catalog_path(duong_dan)} (sha256 {checksum[:12]}…) không khớp với phiên bản nào do "
+        f"{to_catalog_path(duong_dan)} (sha256 {checksum[:12]}…) không khớp với phiên bản nào do "
         f"pipeline tạo ra - có thể đã bị sửa ngoài pipeline, không dùng để tạo dữ liệu tầng sau",
         db_path=db_path,
     )
@@ -317,18 +422,24 @@ def verify_version(version_id: int, db_path: Optional[str] = None) -> dict:
     """
     van_de, da_kiem = [], 0
 
-    def _kiem(nhan: str, duong_dan_catalog: str, checksum: str):
+    def _kiem(nhan: str, duong_dan_catalog: str, checksum: str, phien_ban_delta: Optional[int] = None):
         nonlocal da_kiem
         da_kiem += 1
         duong_dan = from_catalog_path(duong_dan_catalog)
         if not os.path.exists(duong_dan):
             van_de.append(f"{nhan}: không còn file {duong_dan_catalog}")
-        elif file_checksum(duong_dan) != checksum:
-            van_de.append(f"{nhan}: file {duong_dan_catalog} đã thay đổi sau khi ghi provenance")
+            return
+        try:
+            khop = path_checksum(duong_dan, phien_ban_delta) == checksum
+        except Exception as loi:    # ví dụ phiên bản Delta đã bị dọn (VACUUM) hoặc file Parquet bị xóa
+            van_de.append(f"{nhan}: không đọc được {duong_dan_catalog} ({type(loi).__name__})")
+            return
+        if not khop:
+            van_de.append(f"{nhan}: {duong_dan_catalog} đã thay đổi sau khi ghi provenance")
 
     def _duyet(nut):
         v = nut["version"]
-        _kiem(f"{v['table_name']} (phiên bản #{v['id']})", v["file_path"], v["checksum"])
+        _kiem(f"{v['table_name']} (phiên bản #{v['id']})", v["file_path"], v["checksum"], v.get("table_version"))
         for con in nut["inputs"]:
             if "batch" in con:
                 b = con["batch"]
@@ -346,7 +457,8 @@ def verify_version(version_id: int, db_path: Optional[str] = None) -> dict:
 def format_trace(nut: dict, thut_le: str = "") -> list[str]:
     """Cây provenance dạng các dòng chữ để in ra màn hình."""
     v = nut["version"]
-    dong = [f"{thut_le}{v['table_name']} #{v['id']} | {v['row_count']} dòng | sha256 {v['checksum'][:12]}… "
+    delta = f" | Delta v{v['table_version']}" if v.get("table_version") is not None else ""
+    dong = [f"{thut_le}{v['table_name']} #{v['id']}{delta} | {v['row_count']} dòng | sha256 {v['checksum'][:12]}… "
             f"| run {v['run_id']} | {v['created_at']}"]
     for con in nut["inputs"]:
         if "batch" in con:

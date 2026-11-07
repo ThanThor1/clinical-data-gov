@@ -2,15 +2,16 @@
 Ứng dụng Dashboard Quản trị Dữ liệu Lâm sàng Đa Bệnh viện
 Phụ trách bởi: Người 3 (Catalog, Phân quyền, Audit, Dashboard và Báo cáo)
 
-Người xem chọn tài khoản ở thanh bên; mọi lần đọc dữ liệu trên dashboard đều đi qua
-catalog_access.read_table nên được kiểm tra quyền và ghi vào sổ audit như pipeline.
+Người xem đăng nhập bằng tài khoản + mật khẩu (catalog_access/auth.py); mọi lần đọc dữ liệu trên dashboard
+đều đi qua catalog_access.read_table nên được kiểm tra quyền và ghi vào sổ audit như pipeline.
 
 Gồm 6 trang:
 1. Catalog: Danh sách các bảng qua 3 tầng (Raw, Standardized, AI-ready), từ điển cột theo hợp đồng
 2. Truy cập dữ liệu: Đọc thử một bảng với tài khoản hiện tại (được phép / bị từ chối / bị ẩn cột)
 3. Lineage: Đồ thị đường đi dữ liệu từ nguồn bệnh viện đến AI-ready, phân tích tác động theo cột
 4. Provenance: Các lần chạy pipeline, lô dữ liệu (checksum), phiên bản bảng và cây nguồn gốc
-5. Vi phạm (Violations): Lỗi gây hỏng (Breaking) TÔ MÀU ĐỎ và chỉ rõ bảng AI bị ảnh hưởng, lô gây lỗi
+5. Vi phạm (Violations): Lỗi gây hỏng (Breaking) TÔ MÀU ĐỎ, chỉ rõ bảng AI bị ảnh hưởng, lô gây lỗi, trạng thái
+   (đang mở / đã xử lý); kỹ sư dữ liệu duyệt đổi tên cột ngay trên trang
 6. Audit: Kiểm tra toàn vẹn sổ (chuỗi băm) và sổ nhật ký hành động toàn hệ thống
 
 Chạy: streamlit run dashboard/app.py
@@ -19,6 +20,7 @@ Chạy: streamlit run dashboard/app.py
 import html
 import json
 import os
+import re
 import sys
 import pandas as pd
 import streamlit as st
@@ -36,11 +38,13 @@ from catalog_access.init_db import get_db_connection, init_database
 from catalog_access.catalog import list_datasets, get_dataset
 from catalog_access.audit import get_audit_logs, verify_audit_chain
 from catalog_access.access import AccessDenied, can_view_audit, get_role_info, load_policies
-from catalog_access.data_access import read_table
+from catalog_access.auth import authenticate
+from catalog_access.data_access import from_catalog_path, is_delta_table, read_table
 from governance.contracts import find_contract
 from governance.lineage import get_affected_ai_tables, get_impact_paths, get_table_tier
-from governance.provenance import format_trace, get_batches, get_dataset_versions, get_runs, trace_version, verify_version
-from governance.schema_registry import get_schema_history
+from governance.provenance import (format_trace, get_batches, get_dataset_versions, get_runs, source_batches,
+                                   trace_version, verify_version)
+from governance.schema_registry import approve_rename, get_schema_approvals, get_schema_history
 
 # Cấu hình trang Streamlit
 st.set_page_config(
@@ -79,6 +83,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 TEN_TANG = {"raw": "Thô (Raw)", "standardized": "Chuẩn hóa (Standardized)", "ai_ready": "AI-Ready"}
+TEN_TRANG_THAI = {"OPEN": "🔴 Đang mở", "RESOLVED": "✅ Đã xử lý", "SUPERSEDED": "↻ Đã ghi nhận lại"}
+# Mô tả vi phạm đổi tên cột (gates.py + schema_registry.py): "Cột 'admissionweight' bị đổi tên thành 'weight'"
+MAU_DOI_TEN = re.compile(r"Cột '([^']+)' bị đổi tên thành '([^']+)'")
 MAU_TRANG_THAI = {"SUCCESS": "🟢", "PARTIAL": "🟡", "BLOCKED": "🔴", "FAILED": "🔴", "RUNNING": "⏳"}
 
 
@@ -87,7 +94,7 @@ def load_violations():
     conn = get_db_connection()
     df = pd.read_sql_query("""
     SELECT id, error_type, severity, hospital, affected_table, affected_ai_table, action, details,
-           timestamp, run_id, batch
+           timestamp, run_id, batch, status, resolved_at, resolved_run_id, resolution
     FROM violations ORDER BY id DESC;
     """, conn)
     conn.close()
@@ -103,6 +110,11 @@ def load_lineage():
     """, conn)
     conn.close()
     return df
+
+
+def gop_vien(ten_bang):
+    """'raw_patient_hospital_146' -> 'raw_patient_hospital_*' (gộp các bệnh viện khi vẽ đồ thị)."""
+    return re.sub(r"_hospital_[^.]+$", "_hospital_*", ten_bang)
 
 
 def bang_tu_dien_cot(ten_bang):
@@ -137,11 +149,30 @@ st.sidebar.title("Quản Trị Lâm Sàng")
 st.sidebar.caption("Đề tài 5: Quản trị dữ liệu lâm sàng đa bệnh viện (eICU Demo)")
 
 policies = load_policies()
-tai_khoan = [u for u in ("engineer_alice", "analyst_dave", "researcher_bob", "guest_charlie")
-             if u in policies.get("users", {})]
-nguoi_dung = st.sidebar.selectbox("ĐĂNG NHẬP VỚI TÀI KHOẢN:", tai_khoan, index=0)
+
+# Đăng nhập bằng mật khẩu (băm PBKDF2 trong policies.yaml); đúng / sai đều ghi audit_log
+if "nguoi_dung" not in st.session_state:
+    st.markdown('<div class="main-header">🔑 Đăng nhập</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Quyền xem dữ liệu, cột nhạy cảm và sổ audit tùy theo vai trò của tài khoản '
+                '(catalog_access/policies.yaml)</div>', unsafe_allow_html=True)
+    with st.form("dang_nhap"):
+        ten_dang_nhap = st.text_input("Tài khoản")
+        mat_khau = st.text_input("Mật khẩu", type="password")
+        bam_dang_nhap = st.form_submit_button("Đăng nhập")
+    if bam_dang_nhap:
+        if authenticate(ten_dang_nhap, mat_khau):
+            st.session_state["nguoi_dung"] = ten_dang_nhap.strip().lower()
+            st.rerun()
+        st.error("Sai tài khoản hoặc mật khẩu (lần thử đã được ghi vào sổ audit).")
+    st.stop()
+
+nguoi_dung = st.session_state["nguoi_dung"]
 vai_tro = get_role_info(nguoi_dung, policies)
+st.sidebar.markdown(f"Đã đăng nhập: **{nguoi_dung}**")
 st.sidebar.caption(f"Vai trò: **{vai_tro.get('display_name', vai_tro['role'])}** – {vai_tro.get('description', '')}")
+if st.sidebar.button("Đăng xuất"):
+    del st.session_state["nguoi_dung"]
+    st.rerun()
 
 menu = st.sidebar.radio(
     "CHỌN TRANG XEM:",
@@ -206,7 +237,8 @@ if "1. 📚 Catalog" in menu:
     with col1:
         st.metric("Tổng số bảng dữ liệu", len(datasets_df))
     with col2:
-        st.metric("Tầng Thô (Raw)", int((datasets_df['tier'] == 'raw').sum()), "Từ 3 BV")
+        so_nguon = datasets_df.loc[datasets_df["source_system"].fillna("") != "", "source_system"].nunique()
+        st.metric("Tầng Thô (Raw)", int((datasets_df['tier'] == 'raw').sum()), f"Từ {so_nguon} hệ thống nguồn")
     with col3:
         st.metric("Tầng Chuẩn Hóa", int((datasets_df['tier'] == 'standardized').sum()), "Đã gộp schema")
     with col4:
@@ -233,10 +265,10 @@ if "1. 📚 Catalog" in menu:
         st.subheader(f"Danh sách các bảng ({len(filtered_df)} bảng)")
 
         # Bảng chi tiết
-        display_df = filtered_df[['id', 'name', 'hospital', 'tier', 'owner', 'sensitive_columns', 'contract',
-                                  'row_count', 'updated_at']].copy()
-        display_df.columns = ['ID', 'Tên Bảng', 'Bệnh Viện', 'Tầng Dữ Liệu', 'Người Phụ Trách',
-                              'Cột Nhạy Cảm (Sensitive)', 'Hợp Đồng', 'Số Dòng', 'Cập Nhật']
+        display_df = filtered_df[['id', 'name', 'hospital', 'tier', 'source_system', 'source_format', 'owner',
+                                  'sensitive_columns', 'contract', 'row_count', 'updated_at']].copy()
+        display_df.columns = ['ID', 'Tên Bảng', 'Bệnh Viện', 'Tầng Dữ Liệu', 'Hệ Thống Nguồn', 'Định Dạng Gốc',
+                              'Người Phụ Trách', 'Cột Nhạy Cảm (Sensitive)', 'Hợp Đồng', 'Số Dòng', 'Cập Nhật']
         st.dataframe(display_df, width="stretch", hide_index=True)
 
         # Chi tiết một bảng: mô tả, vị trí file, từ điển cột theo hợp đồng, schema thực tế mới nhất
@@ -245,7 +277,9 @@ if "1. 📚 Catalog" in menu:
         ds = get_dataset(ten_bang) or {}
         st.markdown(f"**Mô tả:** {ds.get('description') or '(chưa có)'}  \n"
                     f"**Hợp đồng:** `{ds.get('contract') or 'chưa có hợp đồng'}` | "
-                    f"**Vị trí file:** `{ds.get('file_path') or '(chưa đăng ký)'}`")
+                    f"**Vị trí file:** `{ds.get('file_path') or '(chưa đăng ký)'}`"
+                    + (f"  \n**Hệ thống nguồn:** `{ds['source_system']}` (định dạng gốc `{ds.get('source_format')}`, "
+                       "xem sources/*.yaml)" if ds.get("source_system") else ""))
         tu_dien = bang_tu_dien_cot(ten_bang)
         if tu_dien is not None:
             st.caption("Từ điển cột theo hợp đồng dữ liệu (contracts/*.yaml)")
@@ -336,22 +370,23 @@ elif "3. 🔗 Lineage" in menu:
         st.info("Chưa có lineage. Chạy `python run_demo.py --reset` trước.")
     else:
         muc = st.radio("Mức hiển thị:", ["Mức bảng", "Mức cột"], horizontal=True)
+        so_vien = lineage_df["source_table"].str.extract(r"_hospital_(.+)$")[0].nunique()
         col_graph, col_table = st.columns([3, 2])
 
         with col_graph:
             st.subheader("Trực quan hóa luồng dữ liệu (Pipeline Graph)")
-            # Xây dựng đồ thị NetworkX; xếp theo tầng: raw (trái) -> standardized -> AI-ready (phải)
+            # Xây dựng đồ thị NetworkX; xếp theo tầng: raw (trái) -> standardized -> AI-ready (phải).
+            # Bảng raw của các bệnh viện được gộp thành một nút cho mỗi loại (raw_patient_hospital_*)
             G = nx.DiGraph()
             for _, row in lineage_df.iterrows():
+                nguon, dich = gop_vien(row['source_table']), gop_vien(row['target_table'])
                 if muc == "Mức bảng":
-                    src, tgt = row['source_table'], row['target_table']
-                    G.add_node(src, bang=src)
-                    G.add_node(tgt, bang=tgt)
+                    src, tgt = nguon, dich
                 else:
-                    src = f"{row['source_table']}\n.{row['source_column']}"
-                    tgt = f"{row['target_table']}\n.{row['target_column']}"
-                    G.add_node(src, bang=row['source_table'])
-                    G.add_node(tgt, bang=row['target_table'])
+                    src = f"{nguon}\n.{row['source_column']}"
+                    tgt = f"{dich}\n.{row['target_column']}"
+                G.add_node(src, bang=row['source_table'])
+                G.add_node(tgt, bang=row['target_table'])
                 G.add_edge(src, tgt)
 
             thu_tu_tang = {"raw": 0, "standardized": 1, "ai_ready": 2}
@@ -373,10 +408,12 @@ elif "3. 🔗 Lineage" in menu:
             st.pyplot(fig)
             plt.close(fig)
 
-            st.caption("🔵 Xanh dương: Tầng Thô (Raw) | 🟡 Vàng: Chuẩn Hóa (Standardized) | 🟢 Xanh lá: AI-Ready")
+            st.caption("🔵 Xanh dương: Tầng Thô (Raw) | 🟡 Vàng: Chuẩn Hóa (Standardized) | 🟢 Xanh lá: AI-Ready"
+                       f" | `raw_*_hospital_*` = gộp {so_vien} bệnh viện")
 
         with col_table:
             st.subheader("Chi tiết ánh xạ cột (Column Mappings)")
+            st.caption(f"{len(lineage_df)} cạnh mức cột")
             st.dataframe(
                 lineage_df.rename(columns={
                     'source_table': 'Bảng Nguồn',
@@ -393,10 +430,10 @@ elif "3. 🔗 Lineage" in menu:
         st.subheader("🎯 Phân tích tác động (Impact Analysis)")
         st.caption("Nếu một cột ở bệnh viện nguồn bị lỗi thì bảng AI-ready nào bị ảnh hưởng, qua đường đi nào?")
         bang_nguon = sorted(lineage_df["source_table"].unique())
+        mac_dinh = next((b for b in ("raw_patient_hospital_123", "raw_patient_hospital_B") if b in bang_nguon), bang_nguon[0])
         i1, i2 = st.columns(2)
         with i1:
-            bang_chon = st.selectbox("Bảng:", bang_nguon,
-                                     index=bang_nguon.index("raw_patient_hospital_B") if "raw_patient_hospital_B" in bang_nguon else 0)
+            bang_chon = st.selectbox("Bảng:", bang_nguon, index=bang_nguon.index(mac_dinh))
         with i2:
             cot_nguon = sorted(lineage_df[lineage_df["source_table"] == bang_chon]["source_column"].unique())
             cot_chon = st.selectbox("Cột:", ["(cả bảng)"] + cot_nguon)
@@ -445,9 +482,10 @@ elif "4. 🧾 Provenance" in menu:
         else:
             lo_df["checksum"] = lo_df["checksum"].str[:16] + "…"
             st.dataframe(lo_df[["id", "table_name", "batch", "status", "row_count", "schema_version", "contract",
-                                "checksum", "source_file"]].rename(columns={
+                                "mapping", "checksum", "source_file"]].rename(columns={
                 "id": "Lô #", "table_name": "Bảng", "batch": "Đợt gửi", "status": "Kết quả", "row_count": "Số dòng",
-                "schema_version": "Schema", "contract": "Hợp đồng", "checksum": "SHA-256", "source_file": "File nguồn"}),
+                "schema_version": "Schema", "contract": "Hợp đồng", "mapping": "Đổi tên đã duyệt",
+                "checksum": "SHA-256", "source_file": "File nguồn"}),
                 width="stretch", hide_index=True)
 
         st.markdown("---")
@@ -462,13 +500,28 @@ elif "4. 🧾 Provenance" in menu:
             pb_chon = st.selectbox("Phiên bản:", [f"#{r['id']} – {r['created_at']} – {r['row_count']} dòng – {r['run_id']}"
                                                    for _, r in cac_pb.iterrows()])
             ma_pb = int(pb_chon.split(" ")[0].lstrip("#"))
-            st.code("\n".join(format_trace(trace_version(ma_pb))), language=None)
+            cay = trace_version(ma_pb)
+            dong_cay = format_trace(cay)
+            if len(dong_cay) > 60:
+                dong_cay = dong_cay[:60] + [f"... (còn {len(dong_cay) - 60} lô nữa, tổng {len(source_batches(ma_pb))} lô nguồn)"]
+            st.code("\n".join(dong_cay), language=None)
             if st.button("🔁 Kiểm tra lại checksum của phiên bản và mọi file nguồn"):
                 kq = verify_version(ma_pb)
                 if kq["ok"]:
                     st.success(f"✅ Toàn bộ {kq['da_kiem']} file khớp checksum đã ghi.")
                 else:
                     st.error("🚨 Có file không còn khớp provenance:\n\n" + "\n".join(f"- {v}" for v in kq["van_de"]))
+
+            # Delta Lake lưu mọi phiên bản của bảng (time travel): ai ghi, lúc nào, thao tác gì
+            duong_dan_bang = from_catalog_path(cac_pb.iloc[0]["file_path"])
+            if is_delta_table(duong_dan_bang):
+                from deltalake import DeltaTable
+                lich_su = pd.DataFrame(DeltaTable(duong_dan_bang).history())
+                st.caption(f"Lịch sử phiên bản Delta Lake của `{bang_pb}` (mới nhất trước)")
+                cot_ls = [c for c in ("version", "timestamp", "operation", "engineInfo") if c in lich_su.columns]
+                if "timestamp" in lich_su.columns:
+                    lich_su["timestamp"] = pd.to_datetime(lich_su["timestamp"], unit="ms")
+                st.dataframe(lich_su[cot_ls].head(20), width="stretch", hide_index=True)
 
 
 # =========================================================
@@ -486,12 +539,30 @@ elif "5. ⚠️ Vi phạm" in menu:
         </div>
         """, unsafe_allow_html=True)
 
-    f1, f2 = st.columns(2)
+    # Vòng đời: mở -> đã xử lý (lô / bảng qua cổng ở lần chạy sau) hoặc ghi nhận lại (lỗi lặp lại ở lần chạy sau)
+    da_xu_ly = violations_df[violations_df["status"] == "RESOLVED"]
+    thoi_gian_xu_ly = (pd.to_datetime(da_xu_ly["resolved_at"], errors="coerce")
+                       - pd.to_datetime(da_xu_ly["timestamp"], errors="coerce")).dropna()
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        st.metric("Vi phạm đang mở", int((violations_df["status"] == "OPEN").sum()))
+    with s2:
+        st.metric("Đã xử lý", len(da_xu_ly), "lô / bảng qua cổng ở lần chạy sau")
+    with s3:
+        st.metric("Thời gian xử lý trung bình",
+                  f"{thoi_gian_xu_ly.mean().total_seconds() / 60:.1f} phút" if len(thoi_gian_xu_ly) else "–")
+
+    f1, f2, f3 = st.columns(3)
     with f1:
-        run_loc = st.selectbox("Lọc theo lần chạy:", ["Tất cả"] + [r["run_id"] for r in cac_lan_chay])
+        trang_thai_loc = st.selectbox("Lọc theo trạng thái:", ["OPEN", "Tất cả", "RESOLVED", "SUPERSEDED"],
+                                      format_func=lambda t: TEN_TRANG_THAI.get(t, t))
     with f2:
+        run_loc = st.selectbox("Lọc theo lần chạy:", ["Tất cả"] + [r["run_id"] for r in cac_lan_chay])
+    with f3:
         muc_loc = st.selectbox("Lọc theo mức độ:", ["Tất cả", "BREAKING", "WARNING"])
     loc_df = violations_df
+    if trang_thai_loc != "Tất cả":
+        loc_df = loc_df[loc_df["status"] == trang_thai_loc]
     if run_loc != "Tất cả":
         loc_df = loc_df[loc_df["run_id"] == run_loc]
     if muc_loc != "Tất cả":
@@ -500,22 +571,65 @@ elif "5. ⚠️ Vi phạm" in menu:
     # Số lượng vi phạm
     m1, m2, m3 = st.columns(3)
     with m1:
-        st.metric("Tổng số vi phạm", len(loc_df))
+        st.metric("Số vi phạm theo bộ lọc", len(loc_df))
     with m2:
         st.metric("Lỗi gây hỏng (Breaking)", int((loc_df['severity'] == 'BREAKING').sum()), "Tô màu đỏ (Đã chặn)")
     with m3:
         st.metric("Cảnh báo chất lượng", int((loc_df['severity'] == 'WARNING').sum()), "Vượt ngưỡng Kahn")
 
+    # Duyệt thay đổi schema: bệnh viện đổi tên cột là hợp lệ -> không cần gửi lại dữ liệu
+    doi_ten_mo = violations_df[(violations_df["error_type"] == "SCHEMA_COLUMN_RENAMED")
+                               & (violations_df["status"] == "OPEN")]
+    with st.expander(f"✅ Duyệt thay đổi schema (đổi tên cột) – {len(doi_ten_mo)} vi phạm đổi tên đang mở",
+                     expanded=not doi_ten_mo.empty):
+        st.caption("Duyệt = xác nhận cột mới bệnh viện gửi chính là cột trong hợp đồng. Lần chạy pipeline sau sẽ đổi tên "
+                   "khi đọc, lô qua cổng, vi phạm chuyển sang 'Đã xử lý' (governance/schema_registry.approve_rename).")
+        if not vai_tro.get("can_write"):
+            st.info(f"Vai trò **{vai_tro.get('display_name', vai_tro['role'])}** không được ghi dữ liệu nên không "
+                    "duyệt được thay đổi schema.")
+        elif doi_ten_mo.empty:
+            st.caption("Không có vi phạm đổi tên cột nào đang mở.")
+        else:
+            lua_chon = {}
+            for _, v in doi_ten_mo.iterrows():
+                khop = MAU_DOI_TEN.search(v["details"])
+                if khop:
+                    lua_chon[f"#{v['id']} {v['affected_table']} ({v['batch']}): '{khop.group(2)}' = '{khop.group(1)}'"] = (
+                        v["affected_table"], khop.group(2), khop.group(1))
+            with st.form("duyet_doi_ten"):
+                chon = st.selectbox("Vi phạm cần duyệt:", list(lua_chon))
+                ly_do = st.text_input("Lý do duyệt", "Bệnh viện đổi tên cột, nội dung không đổi")
+                bam_duyet = st.form_submit_button("Duyệt đổi tên cột")
+            if bam_duyet and chon:
+                bang_duyet, cot_moi, cot_chuan = lua_chon[chon]
+                try:
+                    ma_duyet = approve_rename(nguoi_dung, bang_duyet, cot_moi, cot_chuan, ly_do)
+                    st.success(f"Đã duyệt #{ma_duyet}: `{bang_duyet}.{cot_moi}` = `{cot_chuan}`. "
+                               "Chạy lại pipeline để lô qua cổng.")
+                except (AccessDenied, ValueError) as loi:
+                    st.error(f"Không duyệt được: {loi}")
+        cac_lan_duyet = get_schema_approvals()
+        if cac_lan_duyet:
+            st.dataframe(pd.DataFrame(cac_lan_duyet).rename(columns={
+                "id": "#", "table_name": "Bảng", "source_column": "Cột bệnh viện gửi", "target_column": "Cột hợp đồng",
+                "approved_by": "Người duyệt", "reason": "Lý do", "approved_at": "Lúc duyệt"}),
+                width="stretch", hide_index=True)
+
     st.markdown("---")
     st.subheader("Danh sách chi tiết vi phạm:")
+    TOI_DA_THE = 200
+    if len(loc_df) > TOI_DA_THE:
+        st.caption(f"Hiển thị {TOI_DA_THE} vi phạm mới nhất trên tổng {len(loc_df)} (lọc theo lần chạy / mức độ để xem thêm)")
 
-    for _, v in loc_df.iterrows():
+    for _, v in loc_df.head(TOI_DA_THE).iterrows():
         is_break = v['severity'] in ('BREAKING', 'CRITICAL')
         box_style = "border-left: 6px solid #dc2626; background-color: #fef2f2;" if is_break else "border-left: 6px solid #f59e0b; background-color: #fffbeb;"
         badge_color = "#dc2626" if is_break else "#d97706"
         ai_color = "#b91c1c" if is_break else "#92400e"
         nguon_goc = (f" | <b>Lô:</b> <code>{html.escape(v['batch'])}</code>" if v['batch'] else "") + \
                     (f" | <b>Lần chạy:</b> <code>{html.escape(v['run_id'])}</code>" if v['run_id'] else "")
+        xu_ly = (f"<br><b>Xử lý:</b> {html.escape(v['resolution'])} ({html.escape(str(v['resolved_at']))})"
+                 if v['resolution'] else "")
 
         st.markdown(f"""
         <div style="border-radius: 8px; padding: 14px; margin-bottom: 12px; {box_style}">
@@ -524,13 +638,13 @@ elif "5. ⚠️ Vi phạm" in menu:
                     [{html.escape(v['error_type'])}] - Mức độ: {html.escape(v['severity'])}
                 </span>
                 <span style="background-color:{badge_color}; color:white; padding:3px 10px; border-radius:12px; font-size:12px; font-weight:bold;">
-                    HÀNH ĐỘNG: {html.escape(v['action'].upper())}
+                    HÀNH ĐỘNG: {html.escape(v['action'].upper())} | {html.escape(TEN_TRANG_THAI.get(v['status'], v['status']))}
                 </span>
             </div>
             <p style="margin: 8px 0 4px 0; color:#334155;"><b>Bệnh viện vi phạm:</b> {html.escape(v['hospital'])} | <b>Bảng phát hiện:</b> <code>{html.escape(v['affected_table'])}</code>{nguon_goc}</p>
             <p style="margin: 4px 0; color:{ai_color};"><b>Bảng AI-ready bị đe dọa:</b> <code>{html.escape(v['affected_ai_table'] or 'N/A')}</code></p>
             <p style="margin: 4px 0; color:#475569;"><b>Chi tiết lỗi:</b> {html.escape(v['details'])}</p>
-            <small style="color:#94a3b8;">Thời gian ghi nhận: {html.escape(str(v['timestamp']))}</small>
+            <small style="color:#94a3b8;">Thời gian ghi nhận: {html.escape(str(v['timestamp']))}{xu_ly}</small>
         </div>
         """, unsafe_allow_html=True)
 

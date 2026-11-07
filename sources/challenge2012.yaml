@@ -1,0 +1,60 @@
+# Nguồn thứ hai, KHÁC hẳn eICU về định dạng, tên biến, mã hóa, giá trị thiếu, cách ghi thời gian và định nghĩa nhãn.
+# Bộ chuyển pipeline/source_adapters.py đọc bản gốc (không cần giải nén) và ánh xạ về schema chuẩn
+# theo đúng các khai báo dưới đây; lineage từ tham số gốc tới tầng AI-ready cũng sinh từ file này.
+
+name: challenge2012
+system: PhysioNet/CinC Challenge 2012, set A (4.000 lượt nằm ICU)
+format: eav_long                  # dạng dài: mỗi lượt nằm ICU một file "Time,Parameter,Value"
+description: Mỗi lượt nằm ICU một file Time,Parameter,Value (48 giờ đầu); kết quả điều trị ở file riêng
+license: ODC-By 1.0
+url: https://physionet.org/content/challenge-2012/1.0.0/
+landing: data/01_landing/challenge2012
+files:
+  records: set-a.tar.gz           # set-a/<RecordID>.txt
+  outcomes: Outcomes-a.txt        # RecordID,SAPS-I,SOFA,Length_of_stay,Survival,In-hospital_death
+hospitals: [c2012]                # mã "viện" của nguồn này trong hệ thống: hospital_c2012
+
+missing_value: -1                 # nguồn ghi -1 cho giá trị không có -> để trống
+id_parameter: RecordID
+time_column: Time                 # "hh:mm" kể từ lúc vào ICU -> số phút (observationoffset, labresultoffset)
+
+# Bảng patient (mỗi lượt nằm ICU một dòng): cột chuẩn <- tham số gốc
+patient:
+  patientunitstayid: {from: RecordID}
+  age: {from: Age}                                       # đã gộp người trên 89 tuổi thành 90
+  gender: {from: Gender, values: {0: Female, 1: Male}}
+  admissionweight: {from: Weight, rule: first}           # giá trị Weight hợp lệ đầu tiên (kg)
+  unitdischargestatus: {from: In-hospital_death, file: outcomes, values: {0: Alive, 1: Expired}}
+
+# Bảng vital (mỗi lần đo một dòng)
+vital:
+  heartrate: {from: HR}
+
+# Bảng lab: tham số gốc -> labname chuẩn (tên của eICU). Đơn vị đã đối chiếu bằng trung vị với eICU
+# (ví dụ magnesium 2,0 so với 1,9 mg/dL) nên không cần đổi; nguồn nào khác đơn vị thì thêm
+# scale: <hệ số>, note: "<đơn vị nguồn> -> <đơn vị chuẩn>"
+lab:
+  Creatinine: {to: creatinine}
+  Glucose: {to: glucose}
+  BUN: {to: BUN}
+  Na: {to: sodium}
+  K: {to: potassium}
+  HCO3: {to: bicarbonate}
+  Lactate: {to: lactate}
+  Mg: {to: magnesium}
+  Albumin: {to: albumin}
+  Platelets: {to: platelets x 1000}
+  WBC: {to: WBC x 1000}
+  HCT: {to: Hct}
+  pH: {to: pH}
+  PaCO2: {to: paCO2}
+  PaO2: {to: paO2}
+  Bilirubin: {to: total bilirubin}
+  ALT: {to: ALT (SGPT)}
+  AST: {to: AST (SGOT)}
+  ALP: {to: alkaline phos.}
+  TroponinI: {to: troponin - I}
+  TroponinT: {to: troponin - T}
+
+semantics:
+  unitdischargestatus: in_hospital_death     # tử vong trong BỆNH VIỆN, không phải lúc ra ICU như eICU

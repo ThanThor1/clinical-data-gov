@@ -1,6 +1,32 @@
+"""
+Gây lỗi giả lập cho đợt 3 (thư mục thời điểm *20-00-00) của một bệnh viện, để thử hệ thống governance.
+
+Mỗi loại lỗi mặc định gây cho viện theo THỨ HẠNG số bệnh nhân (hạng 1 = đông nhất):
+    doi_ten        : hạng 2  - đổi tên cột admissionweight -> weight
+    doi_kieu       : hạng 1  - cân nặng thành chuỗi có đơn vị ("70.5 kg")
+    xoa_cot        : hạng 3  - xóa cột gender
+    nhip_tim_500   : hạng 1  - 5% dòng sinh hiệu có nhịp tim = 500
+    thieu_can_nang : hạng 2  - xóa trắng 50% cân nặng
+Với eICU demo: hạng 1, 2, 3 là viện 146, 123, 157 (157 và 171 cùng 25 bệnh nhân, mã nhỏ xếp trước);
+với dữ liệu giả: A, B, C.
+
+Chạy:
+    python -m pipeline.inject_errors --loi doi_ten                # viện hạng 2
+    python -m pipeline.inject_errors --loi doi_ten --vien 264     # chỉ định viện
+    python -m pipeline.inject_errors --sua-lai --vien 123         # khôi phục đợt 3 từ bản sao lưu
+
+Lỗi do PIPELINE (code biến đổi sai, dữ liệu nguồn vẫn đúng) - bật bằng biến môi trường cho một lần chạy:
+    PIPELINE_LOI_GIA_LAP=can_nang_pound   python -m pipeline.standardize
+    PIPELINE_LOI_GIA_LAP=dao_nhan_tu_vong python -m pipeline.build_ai_ready
+Phiên bản code của lần chạy có thêm '+loi.<tên>' (governance/provenance.get_code_version).
+"""
+
 import os
 import argparse
+import glob
 import shutil
+from contextlib import contextmanager
+
 import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -10,6 +36,34 @@ BACKUP_DIR = os.path.join(DATA_DIR, "_backup_inject")
 
 # Cố định hạt giống ngẫu nhiên: chạy lại vẫn hỏng đúng những dòng đó (kết quả đánh giá lặp lại được)
 HAT_GIONG = 42
+
+# Lỗi pipeline giả lập: cả hai đều cho ra dữ liệu ĐÚNG hợp đồng nhưng SAI nghĩa (cổng hợp đồng không bắt được)
+BIEN_LOI_PIPELINE = "PIPELINE_LOI_GIA_LAP"
+LOI_PIPELINE = {
+    "can_nang_pound": ("standardized_patients", "standardize đổi cân nặng sang pound (x2,20462) mà vẫn ghi vào weight_kg"),
+    "dao_nhan_tu_vong": ("ai_ready_icu_mortality", "build_ai_ready đảo nhãn: Expired -> 0, còn lại -> 1"),
+}
+
+
+def loi_pipeline() -> str:
+    """Lỗi pipeline giả lập đang bật ('' nếu không có)."""
+    return os.environ.get(BIEN_LOI_PIPELINE, "")
+
+
+@contextmanager
+def gay_loi_pipeline(loai):
+    """Bật lỗi pipeline `loai` (một khóa của LOI_PIPELINE) trong khối with, ra khỏi khối thì tắt."""
+    if loai not in LOI_PIPELINE:
+        raise ValueError(f"Lỗi pipeline '{loai}' không hợp lệ, chỉ nhận {sorted(LOI_PIPELINE)}")
+    cu = os.environ.get(BIEN_LOI_PIPELINE)
+    os.environ[BIEN_LOI_PIPELINE] = loai
+    try:
+        yield
+    finally:
+        if cu is None:
+            os.environ.pop(BIEN_LOI_PIPELINE, None)
+        else:
+            os.environ[BIEN_LOI_PIPELINE] = cu
 
 
 def get_batch_3_dir(hospital, raw_dir=None):
@@ -126,40 +180,59 @@ def sua_lai(hospital, raw_dir=None, backup_dir=None):
             print(f"Đã khôi phục: {file}")
 
 
-# Mỗi loại lỗi gây cho một viện cố định
-MAPPING_VIEN = {
-    "doi_ten": "B",
-    "doi_kieu": "A",
-    "xoa_cot": "C",
-    "nhip_tim_500": "A",
-    "thieu_can_nang": "B",
+# Mỗi loại lỗi gây cho viện có thứ hạng (theo số bệnh nhân) cố định
+MAPPING_HANG = {
+    "doi_ten": 2,
+    "doi_kieu": 1,
+    "xoa_cot": 3,
+    "nhip_tim_500": 1,
+    "thieu_can_nang": 2,
 }
 
 
-def gay_loi(error_type, raw_dir=None, backup_dir=None):
-    """Gây lỗi `error_type` cho viện tương ứng (đợt 3). Trả về viện bị gây lỗi."""
-    vien = MAPPING_VIEN[error_type]
+def xep_hang_vien(raw_dir=None):
+    """
+    Mã các viện của nguồn MẶC ĐỊNH (eICU) trong tầng raw, đông bệnh nhân trước (cùng số bệnh nhân thì mã nhỏ
+    trước). Nguồn khác (ví dụ Challenge 2012, 4.000 lượt nằm ICU) không xếp hạng, để lỗi giả lập luôn rơi vào
+    đúng các viện eICU như mô tả ở đầu file.
+    """
+    from governance.sources import is_default_source
+
+    so_benh_nhan = {}
+    for thu_muc in glob.glob(os.path.join(raw_dir or RAW_DIR, "hospital_*")):
+        ma = os.path.basename(thu_muc)[len("hospital_"):]
+        if not is_default_source(ma):
+            continue
+        so_benh_nhan[ma] = sum(len(pd.read_csv(f, usecols=[0]))
+                               for f in glob.glob(os.path.join(thu_muc, "*", "patient.csv")))
+    return sorted(so_benh_nhan, key=lambda m: (-so_benh_nhan[m], int(m) if m.isdigit() else 0, m))
+
+
+def gay_loi(error_type, raw_dir=None, backup_dir=None, vien=None):
+    """Gây lỗi `error_type` cho đợt 3 của viện `vien` (mặc định theo MAPPING_HANG). Trả về mã viện."""
+    if vien is None:
+        vien = xep_hang_vien(raw_dir)[MAPPING_HANG[error_type] - 1]
     inject_error(error_type, vien, raw_dir, backup_dir)
     return vien
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Gây lỗi giả lập cho đợt 3")
-    parser.add_argument("--loi", type=str, choices=list(MAPPING_VIEN), help="Loại lỗi muốn gây ra")
+    parser.add_argument("--loi", type=str, choices=list(MAPPING_HANG), help="Loại lỗi muốn gây ra")
     parser.add_argument("--sua-lai", action="store_true", help="Khôi phục đợt 3 từ backup")
-    parser.add_argument("--vien", type=str, choices=["A", "B", "C"], help="Viện muốn sửa lại (dành cho --sua-lai)")
+    parser.add_argument("--vien", type=str, help="Mã viện (ví dụ 123); với --loi thì bỏ trống = theo thứ hạng")
 
     args = parser.parse_args(argv)
 
     if args.sua_lai:
         if not args.vien:
-            print("Vui lòng nhập --vien A/B/C khi dùng --sua-lai")
+            print("Vui lòng nhập --vien <mã viện> khi dùng --sua-lai")
         else:
             sua_lai(args.vien)
     elif args.loi:
-        gay_loi(args.loi)
+        gay_loi(args.loi, vien=args.vien)
     else:
-        print("Vui lòng truyền --loi <ten_loi> hoặc --sua-lai --vien <A/B/C>")
+        print("Vui lòng truyền --loi <ten_loi> hoặc --sua-lai --vien <mã viện>")
 
 
 if __name__ == "__main__":

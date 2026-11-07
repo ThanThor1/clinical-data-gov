@@ -79,3 +79,14 @@ users:
   khach: guest
 
 default_role: guest
+
+# Mật khẩu đăng nhập dashboard: CHỈ lưu băm PBKDF2-HMAC-SHA256 (catalog_access/auth.py), không lưu mật khẩu rõ.
+# Tài khoản không có ở đây (ví dụ pipeline_service) không đăng nhập dashboard được.
+# Mật khẩu demo (xem README): engineer_alice = alice@2026, analyst_dave = dave@2026,
+# researcher_bob = bob@2026, guest_charlie = charlie@2026 -> ĐỔI khi triển khai thật:
+#   python -m catalog_access.auth "<mật khẩu mới>"   rồi dán chuỗi băm vào đây
+passwords:
+  engineer_alice: pbkdf2_sha256$200000$2116d65a8ff95297cb9fcf220cf0d21d$ee5c5d024ab7322388ef2806d8d33591c28257e7e1ffd0a2bbe884574cde315b
+  analyst_dave: pbkdf2_sha256$200000$03c8c696f99e8e775e257713b70e3c6f$df1b1b107802e8fd18c42ef14488764f389c808947767cdb07537be251592515
+  researcher_bob: pbkdf2_sha256$200000$3e3efc2908b2206625f3d41c7f2be472$666f40d2d5e90aee44ea6a4874b00954fceee6ef03114b63d7f223121dec568f
+  guest_charlie: pbkdf2_sha256$200000$ad246529ffff55a91e06138162bbfd77$fdfea6286b353ba0bb05689dba150753f10bee136b73bb18a8fe3c5456889404
