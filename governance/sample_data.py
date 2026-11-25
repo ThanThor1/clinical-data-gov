@@ -62,6 +62,13 @@ def make_patient(vien: str, seed: int = 0) -> pd.DataFrame:
 
     trang_thai = ["Alive"] * n
     trang_thai[-1] = "Expired"              # có ít nhất 1 ca tử vong
+    # Tử vong trong bệnh viện: thêm 1 ca ra ICU còn sống nhưng mất trong bệnh viện; ô cuối trống (thiếu nhãn)
+    trang_thai_vien = list(trang_thai)
+    trang_thai_vien[-2] = "Expired"
+    trang_thai_vien[3] = None
+    # Thời gian nằm ICU (phút); 2 lượt nằm dưới 4 giờ (bị loại khỏi cohort của bảng 24h)
+    nam_icu = rng.integers(300, 6000, n)
+    nam_icu[4:6] = [60, 200]
 
     return pd.DataFrame({
         "patientunitstayid": _ma_benh_nhan(vien, n),
@@ -72,7 +79,9 @@ def make_patient(vien: str, seed: int = 0) -> pd.DataFrame:
         "hospitalid": THONG_TIN_VIEN[vien]["hospitalid"],
         "admissionheight": rng.normal(170, 10, n).round(1),
         "admissionweight": can_nang,
+        "unitdischargeoffset": nam_icu,
         "unitdischargestatus": trang_thai,
+        "hospitaldischargestatus": trang_thai_vien,
     })
 
 
@@ -130,6 +139,18 @@ def top_hospitals(staging_dir: str, k: int = 3) -> list[str]:
                 so_bn[os.path.basename(thu_muc)[len("hospital_"):]] = sum(1 for _ in f) - 1
     hang = sorted(so_bn, key=lambda m: (-so_bn[m], int(m) if m.isdigit() else 0, m))
     return hang[:k] if len(hang) >= k else []
+
+
+def make_apache(benh_nhan: pd.DataFrame) -> pd.DataFrame:
+    """
+    Bảng apacheApsVar giả (thành phần GCS) cho các bệnh nhân của `benh_nhan`: bệnh nhân thứ 2 có eyes = -1
+    (không đánh giá được -> GCS trống), các bệnh nhân khác GCS = 4 + 6 + (mã % 5 + 1).
+    """
+    ma = benh_nhan["patientunitstayid"].to_numpy()
+    mat = np.full(len(ma), 4)
+    mat[1:2] = -1
+    return pd.DataFrame({"apacheapsvarid": np.arange(len(ma)) + 1, "patientunitstayid": ma,
+                         "eyes": mat, "motor": 6, "verbal": ma % 5 + 1})
 
 
 def make_hospital(vien: str, seed: int = 0) -> dict[str, pd.DataFrame]:

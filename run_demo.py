@@ -26,6 +26,10 @@ Kịch bản:
   7. Pipeline đổi code (giả lập: chuẩn hóa cân nặng sang pound): dữ liệu vẫn đúng hợp đồng nên cổng không bắt
      được, bộ phát hiện lệch đầu ra chặn (PIPELINE_OUTPUT_DRIFT) -> tầng AI-ready không bị nhiễm bẩn;
      sửa code (tắt lỗi) chạy lại -> vi phạm RESOLVED.
+  8. Dữ liệu cho mô hình của nhóm AI (XGBoost, intelligence/ml_mortality): bảng ai_ready_mortality_24h có đúng
+     23 đặc trưng 24 giờ đầu + nhãn tử vong trong bệnh viện; phần eICU tái tạo ĐÚNG cohort của notebook
+     (2.326 bệnh nhân, 191 ca tử vong); nhà nghiên cứu đọc qua lớp phân quyền; truy được lô nguồn; GCS truy
+     được về bảng APACHE (eICU) và tham số GCS gốc (Challenge 2012).
 """
 
 import argparse
@@ -161,6 +165,58 @@ def kich_ban_loi_pipeline(spark):
     print(f"  -> {'✅' if da_dong else '❌'} vi phạm PIPELINE_OUTPUT_DRIFT {'đã chuyển RESOLVED' if da_dong else 'vẫn mở'}"
           f" ({run_sua})")
     return bool(lech) and not hop_dong and not da_ghi and abs(sau - truoc) < 1e-9 and da_dong
+
+
+# Cohort của notebook process_patient (README của nhóm AI): eICU demo, tuổi >= 18, nằm ICU >= 4 giờ, có nhãn
+COHORT_NOTEBOOK_EICU = {"so_benh_nhan": 2326, "so_tu_vong": 191}
+
+
+def kich_ban_du_lieu_mo_hinh():
+    """Kịch bản 8. Trả về True nếu mọi kỳ vọng đều đúng."""
+    ai = build_ai_ready.AI_24H
+    try:
+        df = read_table("researcher_bob", ai)
+    except (AccessDenied, FileNotFoundError, ValueError) as loi:
+        print(f"  ❌ Không đọc được {ai}: {loi}")
+        return False
+    dat = list(df.columns) == build_ai_ready.COT_AI_24H and len(build_ai_ready.DAC_TRUNG_24H) == 23
+    print(f"  researcher_bob đọc {ai}: {len(df)} dòng, {len(build_ai_ready.DAC_TRUNG_24H)} đặc trưng + nhãn "
+          f"'mortality' (+ patient_hash, source_system không đưa vào mô hình)")
+    for nguon, phan in df.groupby("source_system"):
+        print(f"    {nguon:<14} {len(phan):>5} bệnh nhân, tử vong trong bệnh viện {int(phan['mortality'].sum()):>4} "
+              f"({phan['mortality'].mean() * 100:.2f}%)")
+    eicu = df[df["source_system"] == "eicu_demo"]
+    khop = {"so_benh_nhan": len(eicu), "so_tu_vong": int(eicu["mortality"].sum())}
+    dat &= khop == COHORT_NOTEBOOK_EICU
+    print(f"  Phần eICU so với notebook của nhóm AI: {khop} | notebook {COHORT_NOTEBOOK_EICU} "
+          f"{'✅ khớp' if khop == COHORT_NOTEBOOK_EICU else '❌ lệch'}")
+    thieu = (df[build_ai_ready.DAC_TRUNG_24H].isna().mean() * 100).round(1)
+    print("  % ô trống (giữ nguyên, XGBoost tự xử lý): "
+          + ", ".join(f"{c} {thieu[c]:g}%" for c in build_ai_ready.DAC_TRUNG_24H if thieu[c] > 0))
+
+    phien_ban = provenance.get_latest_version(ai)
+    lo = provenance.source_batches(phien_ban["id"]) if phien_ban else []
+    print(f"  Provenance: phiên bản Delta {phien_ban['table_version'] if phien_ban else '-'}, truy về {len(lo)} lô nguồn"
+          f" (trong đó {sum('apache' in b['table_name'] for b in lo)} lô APACHE)")
+    dat &= bool(lo)
+    duong_di = [p for p in get_impact_paths("nguon_challenge2012", "GCS") if p.endswith(f"{ai}.gcs")]
+    duong_di += [p for p in get_impact_paths(f"raw_apache_hospital_{eicu_vien_dau()}", "eyes") if p.endswith(f"{ai}.gcs")]
+    for p in duong_di:
+        print(f"  Lineage GCS: {p}")
+    canh_bao = [v for v in get_violations() if v["error_type"] == "SEMANTIC_MISMATCH"
+                and ai in v["affected_ai_table"].split(",")]
+    for v in canh_bao[:1]:
+        print(f"  ⚠️  {v['error_type']} {v['affected_table']}: {v['details'][:120]}")
+    return dat
+
+
+def eicu_vien_dau():
+    """Mã viện eICU đầu tiên có gửi bảng APACHE ở tầng raw (rỗng nếu chưa tải apacheApsVar.csv)."""
+    import glob
+
+    from pipeline.split_snapshots import danh_sach_vien
+    return next((v for v in danh_sach_vien(ingest_raw.RAW_DIR) if source_of_hospital(v)["hospitals"] == "default"
+                 and glob.glob(os.path.join(ingest_raw.RAW_DIR, f"hospital_{v}", "*", "apacheApsVar.csv"))), "")
 
 
 def kich_ban_phan_quyen(vien):
@@ -353,9 +409,12 @@ def main(argv=None):
     dat_2 = (len(doi_ten) == 1 and doi_ten[0]["affected_table"] == f"raw_patient_hospital_{vien}"
              and AI in doi_ten[0]["affected_ai_table"].split(",")
              and any(a["bang_nao"] == f"raw_patient_hospital_{vien}" for a in chan)
+             # Bảng patient bị chặn -> các bảng cùng đợt (vital, lab, apache nếu viện có gửi) đều SKIPPED
              and {(b["table_name"], b["status"]) for b in lo_loi} == {
                  (f"raw_patient_hospital_{vien}", "BLOCKED"), (f"raw_vital_hospital_{vien}", "SKIPPED"),
-                 (f"raw_lab_hospital_{vien}", "SKIPPED")}
+                 (f"raw_lab_hospital_{vien}", "SKIPPED"),
+                 *([(f"raw_apache_hospital_{vien}", "SKIPPED")] if any("apache" in b["table_name"] for b in lo_loi)
+                   else [])}
              and set(kq_std["bi_chan"]) - lo_kem_co_san == {f"raw_patient_hospital_{vien} / {lo_loi[0]['batch'].split('/')[1]}"}
              and trang_thai_run(run_id) == "PARTIAL")
     ket_qua.append((f"Kịch bản 2: viện {vien} đổi tên cột bị chặn đúng lô, chỉ ra {AI}, có audit BLOCKED", dat_2))
@@ -403,6 +462,11 @@ def main(argv=None):
     tieu_de("KỊCH BẢN 7: Pipeline đổi code (giả lập: chuẩn hóa cân nặng sang pound) – đúng hợp đồng nhưng sai nghĩa")
     ket_qua.append(("Kịch bản 7: lỗi do pipeline đổi code lọt qua hợp đồng nhưng bị chặn vì đầu ra lệch, "
                     "sửa code thì vi phạm RESOLVED", kich_ban_loi_pipeline(spark)))
+
+    # -----------------------------------------------------------------------
+    tieu_de("KỊCH BẢN 8: Dữ liệu AI-ready cho mô hình XGBoost của nhóm AI (23 đặc trưng 24 giờ đầu)")
+    ket_qua.append(("Kịch bản 8: bảng 23 đặc trưng cho mô hình, phần eICU khớp đúng cohort của notebook "
+                    "(2.326 bệnh nhân, 191 ca tử vong), truy được nguồn gốc", kich_ban_du_lieu_mo_hinh()))
 
     # -----------------------------------------------------------------------
     tieu_de("TỔNG KẾT")

@@ -15,6 +15,8 @@ from governance.schema_registry import get_schema_history
 from governance.violation_engine import get_violations
 
 AI = "ai_ready_icu_mortality"
+# Cân nặng, nhịp tim, xét nghiệm chảy vào CẢ HAI bảng AI-ready (bảng 24h của mô hình XGBoost: bmi, heartrate_*, ...)
+AI_CA_HAI = "ai_ready_icu_mortality,ai_ready_mortality_24h"
 BN_B = "raw_patient_hospital_B"
 
 
@@ -77,7 +79,7 @@ def test_loi_doi_ten_cot_bi_chan(db):
 
     v = get_violations(db)[0]
     assert (v["error_type"], v["severity"], v["hospital"]) == ("SCHEMA_COLUMN_RENAMED", "BREAKING", "Bệnh viện B")
-    assert v["affected_ai_table"] == AI and v["action"] == "đã chặn"
+    assert v["affected_ai_table"] == AI_CA_HAI and v["action"] == "đã chặn"
 
     audit = get_audit_logs(db_path=db)
     assert any(a["ai"] == "governance_gate" and a["bang_nao"] == BN_B and a["ket_qua"] == "BLOCKED" for a in audit)
@@ -93,7 +95,7 @@ def test_doi_ten_ngay_dot_dau_van_bi_chan(db):
     dat, loi = check_gate(BN_B, make_patient("B").rename(columns={"admissionweight": "weight"}), "gate1", db)
     assert dat is False
     assert _loai_loi(db) == ["MISSING_REQUIRED_COLUMN"]
-    assert get_violations(db)[0]["affected_ai_table"] == AI
+    assert get_violations(db)[0]["affected_ai_table"] == AI_CA_HAI
 
 
 def test_vien_B_sua_loi_thi_lai_dat(db):
@@ -149,7 +151,7 @@ def test_loi_nhip_tim_500_nhieu_dong_bi_chan(db):
     assert dat is False
     v = get_violations(db)[0]
     assert (v["error_type"], v["severity"]) == ("PLAUSIBILITY", "BREAKING")
-    assert v["affected_ai_table"] == AI           # heartrate -> heartrate_mean -> AI
+    assert v["affected_ai_table"] == AI_CA_HAI    # heartrate -> heartrate_mean -> AI (và heartrate_* của bảng 24h)
 
 
 def test_nhip_tim_500_mot_dong_chi_canh_bao(db):
@@ -197,7 +199,7 @@ def test_loi_o_raw_lab_anh_huong_ai_qua_dac_trung_xet_nghiem(db, capsys):
     assert dat is False
     v = get_violations(db)[0]
     assert (v["error_type"], v["severity"], v["affected_table"]) == ("SCHEMA_COLUMN_REMOVED", "BREAKING", bang)
-    assert v["affected_ai_table"] == AI
+    assert v["affected_ai_table"] == AI_CA_HAI
     assert f"{AI}.creatinine_max" in capsys.readouterr().out
     audit = get_audit_logs(db_path=db)
     assert any(a["ai"] == "governance_gate" and a["bang_nao"] == bang and a["ket_qua"] == "BLOCKED" for a in audit)
@@ -247,7 +249,7 @@ def test_detailed_tra_ve_dict_day_du(db):
     van_de = check_gate_detailed("raw_patient_hospital_A", df, "gate2", db)
     assert {"rule", "column", "severity", "message", "observed", "expected"} <= set(van_de[0])
     assert van_de[0]["rule"] == "completeness.max_null_pct"
-    assert van_de[0]["affected_ai_tables"] == [AI]
+    assert van_de[0]["affected_ai_tables"] == AI_CA_HAI.split(",")
 
 
 def test_chay_thu_khong_ghi_db(db):

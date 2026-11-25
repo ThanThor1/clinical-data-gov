@@ -25,13 +25,13 @@ def test_ghi_vi_pham_chan_va_tim_bang_ai(db_path, capsys):
     kq = report_violation("SCHEMA_COLUMN_RENAMED", "BREAKING", "raw_patient_hospital_B",
                           "Cột 'admissionweight' bị đổi tên thành 'weight'",
                           column="admissionweight", db_path=db_path)
-    assert kq["affected_ai_tables"] == [AI]
+    assert kq["affected_ai_tables"] == [AI, "ai_ready_mortality_24h"]       # cân nặng -> weight_kg và bmi
 
     dong = get_violations(db_path)[0]
     assert dong["severity"] == "BREAKING"
     assert dong["hospital"] == "Bệnh viện B"
     assert dong["affected_table"] == "raw_patient_hospital_B"
-    assert dong["affected_ai_table"] == AI
+    assert dong["affected_ai_table"] == f"{AI},ai_ready_mortality_24h"
     assert dong["action"] == "đã chặn"
     assert "admissionweight" in dong["details"]
 

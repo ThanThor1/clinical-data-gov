@@ -1,13 +1,16 @@
 # Hợp đồng dữ liệu: bảng sinh hiệu định kỳ THÔ của từng bệnh viện (eICU vitalPeriodic.csv)
 # Ý nghĩa các trường: xem contracts/raw_patient.yaml
 # Lưu ý: Bệnh viện B có 0 dòng vitalPeriodic -> bảng rỗng vẫn phải ĐẠT.
+# v1.1: thêm systemicmean, respiration, temperature (không bắt buộc, không đặt min/max ở tầng raw: dữ liệu thật
+#       có khoảng 1% nhịp thở < 5, nhiệt độ ghi lẫn °F -> làm sạch ở standardized_vitals, không chặn cả lô);
+#       thêm semantics cho sao2 (SpO2 đo qua da)
 
 name: raw_vital
 description: Bảng sinh hiệu đo định kỳ (nhịp tim, SpO2, ...) thô
 applies_to:
   - raw_vital_hospital_*
 owner: Đơn vị ICU bệnh viện nguồn
-version: "1.0"
+version: "1.1"
 tier: raw
 
 columns:
@@ -53,4 +56,26 @@ columns:
     min: 0
     max: 100
     sensitive: false
-    description: Độ bão hòa oxy SpO2 (%)
+    semantics: spo2_pulse_oximetry
+    description: Độ bão hòa oxy SpO2 (%), đo qua da
+
+  systemicmean:
+    type: float
+    required: false
+    nullable: true
+    sensitive: false
+    description: Huyết áp động mạch trung bình (MAP, mmHg), đo xâm lấn
+
+  respiration:
+    type: float
+    required: false
+    nullable: true
+    sensitive: false
+    description: Nhịp thở (lần/phút)
+
+  temperature:
+    type: float
+    required: false
+    nullable: true
+    sensitive: false
+    description: Nhiệt độ (°C; vài viện ghi lẫn °F)

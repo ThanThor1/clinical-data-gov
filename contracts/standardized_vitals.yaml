@@ -1,0 +1,89 @@
+# Hợp đồng dữ liệu: bảng sinh hiệu CHUẨN HÓA (dạng dài: mỗi lần đo một dòng, mọi nguồn cùng một khuôn)
+# Ý nghĩa các trường: xem contracts/raw_patient.yaml
+# min / max ở đây là luật LÀM SẠCH (pipeline/standardize.py): giá trị ngoài khoảng bị để trống, không xóa dòng
+# (cùng luật với notebook xử lý dữ liệu của mô hình, intelligence/ml_mortality/data_processing/process_vital.ipynb).
+# Nhiệt độ > 45 được coi là °F và đổi sang °C TRƯỚC khi làm sạch.
+
+name: standardized_vitals
+description: Sinh hiệu đo định kỳ của mọi nguồn sau khi chuẩn hóa tên cột, đơn vị và làm sạch
+applies_to:
+  - standardized_vitals
+owner: Nhóm Kỹ thuật dữ liệu (Người 1)
+version: "1.0"
+tier: standardized
+
+columns:
+  patient_id:
+    type: int
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: true
+    description: Mã bệnh nhân (từ patientunitstayid, định danh)
+
+  observation_offset:
+    type: int
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: false
+    description: Thời điểm đo, số phút tính từ lúc nhập ICU
+
+  heartrate:
+    type: float
+    required: true
+    nullable: true
+    min: 20
+    max: 300
+    sensitive: false
+    description: Nhịp tim (lần/phút); ngoài khoảng của hợp đồng raw_vital -> trống
+
+  systemicmean:
+    type: float
+    required: false
+    nullable: true
+    min: 20
+    sensitive: false
+    description: Huyết áp động mạch trung bình (mmHg); < 20 là lỗi thiết bị -> trống
+
+  sao2:
+    type: float
+    required: false
+    nullable: true
+    min: 1
+    max: 100
+    sensitive: false
+    description: Độ bão hòa oxy (%); ngoài (0, 100] -> trống
+
+  respiration:
+    type: float
+    required: false
+    nullable: true
+    min: 5
+    sensitive: false
+    description: Nhịp thở (lần/phút); < 5 -> trống
+
+  temperature:
+    type: float
+    required: false
+    nullable: true
+    min: 30
+    max: 45
+    sensitive: false
+    description: Nhiệt độ (°C); > 45 coi là °F và đổi sang °C, còn ngoài [30, 45] -> trống
+
+  source_hospital:
+    type: string
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: false
+    description: Bệnh viện gửi dữ liệu
+
+  source_batch:
+    type: string
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: false
+    description: Đợt gửi chứa dòng này (hospital_X/<thời điểm gửi>)

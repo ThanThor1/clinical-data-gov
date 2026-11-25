@@ -16,6 +16,7 @@ from governance.violation_engine import get_violations
 from pipeline import build_ai_ready, inject_errors, standardize
 
 AI = "ai_ready_icu_mortality"
+AI_24H = build_ai_ready.AI_24H
 
 
 def _chay(mt, spark):
@@ -40,7 +41,7 @@ def test_dang_ky_bang_raw_cho_moi_vien(mt):
     for vien in "ABC":
         ds = get_dataset(f"raw_patient_hospital_{vien}", mt["db"])
         assert ds["tier"] == "raw" and ds["file_path"].endswith("*/patient.csv")
-        assert ds["contract"] == "raw_patient v1.1" and "patientunitstayid" in ds["sensitive_columns"]
+        assert ds["contract"] == "raw_patient v1.2" and "patientunitstayid" in ds["sensitive_columns"]
     assert get_dataset("raw_patient_hospital_A", mt["db"])["row_count"] == 40
     assert get_dataset("raw_vital_hospital_B", mt["db"])["row_count"] == 0
 
@@ -154,7 +155,7 @@ def test_doi_ten_cot_vien_B_bi_chan_dung_lo(mt, spark):
     assert len(ai_df) == 95 - so_bn_dot_3
     run_id = kq["run_id"]
     v = get_violations(mt["db"], severity="BREAKING", run_id=run_id)
-    assert [(x["error_type"], x["affected_ai_table"]) for x in v] == [("SCHEMA_COLUMN_RENAMED", AI)]
+    assert [(x["error_type"], x["affected_ai_table"]) for x in v] == [("SCHEMA_COLUMN_RENAMED", f"{AI},{AI_24H}")]
     assert v[0]["batch"].startswith("hospital_B/") and v[0]["batch"].endswith("20-00-00")
     lo_b = {(b["table_name"], b["status"]) for b in pv.get_batches(run_id, mt["db"])
             if b["batch"] == v[0]["batch"]}
@@ -234,7 +235,8 @@ def test_doc_nhieu_file_khong_lech_cot_khi_mot_vien_xoa_cot(tmp_path, spark):
 
 
 def test_chuan_hoa_benh_nhan(tmp_path, spark):
-    raw = pd.DataFrame({"patientunitstayid": [1, 2, 3, 4], "age": ["> 89", "45", None, "60"],
+    # "60.0": file bị pandas ghi lại (ví dụ inject_errors) -> vẫn là tuổi 60, không được thành trống
+    raw = pd.DataFrame({"patientunitstayid": [1, 2, 3, 4], "age": ["> 89", "45", None, "60.0"],
                         "gender": ["Male", "Female", "Other", None],
                         "admissionweight": [70.5, None, 0.5, 80.0],
                         "unitdischargestatus": ["Alive", "Expired", "Alive", None]})
@@ -242,7 +244,9 @@ def test_chuan_hoa_benh_nhan(tmp_path, spark):
     from governance.contracts import find_contract
     df = standardize.chuan_hoa_benh_nhan(standardize.doc_csv_spark(spark, [f]), find_contract("raw_patient_hospital_x"))
     dong = {r["patient_id"]: r.asDict() for r in df.collect()}
-    assert [dong[i]["age"] for i in (1, 2, 3)] == [90, 45, None]
+    assert [dong[i]["age"] for i in (1, 2, 3, 4)] == [90, 45, None, 60]
+    # Cột không bắt buộc mà file không có -> trống
+    assert (dong[1]["height_cm"], dong[1]["icu_los_min"], dong[1]["hospitaldischargestatus"]) == (None, None, None)
     assert [dong[i]["gender"] for i in (1, 2, 3, 4)] == ["M", "F", "U", "U"]
     assert (dong[1]["weight_kg"], dong[3]["weight_kg"]) == (70.5, None)        # 0.5 kg ngoài [20, 400] -> trống
     assert {(d["source_hospital"], d["source_batch"]) for d in dong.values()} == {
@@ -352,5 +356,138 @@ def test_nguon_khong_dong_nhat_len_toi_ai_ready(mt, spark, tmp_path):
     assert (ds["source_system"], ds["source_format"]) == ("challenge2012", "eav_long")
     assert get_dataset("raw_patient_hospital_A", mt["db"])["source_system"] == "eicu_demo"
     canh_bao = [v for v in get_violations(mt["db"], run_id=kq["run_id"]) if v["error_type"] == "SEMANTIC_MISMATCH"]
-    assert [v["affected_table"] for v in canh_bao] == ["raw_patient_hospital_c2012"]
+    assert sorted(v["affected_table"] for v in canh_bao) == ["raw_patient_hospital_c2012", "raw_vital_hospital_c2012"]
     assert 77.5 in set(ai_df["weight_kg"]) and int(ai_df["icu_mortality"].sum()) >= len(ky_vong) // 2
+
+
+# ---------------------------------------------------------------------------
+# Bảng ai_ready_mortality_24h (mô hình XGBoost của nhóm AI, intelligence/ml_mortality)
+# ---------------------------------------------------------------------------
+
+def test_dac_trung_24h_cohort_cua_so_va_lam_sach(spark):
+    from governance.privacy import pseudonymize_id
+
+    cot_bn = ["patient_id", "age", "gender", "weight_kg", "height_cm", "icu_los_min", "hospitaldischargestatus",
+              "gcs", "source_hospital"]
+    bn = spark.createDataFrame([
+        (1, 70, "M", 80.0, 200.0, 300, "Alive", 14, "A"),
+        (2, 17, "F", 60.0, 160.0, 500, "Alive", 15, "A"),        # dưới 18 tuổi -> loại
+        (3, 50, "F", 60.0, 160.0, 100, "Expired", 15, "A"),      # nằm ICU < 240 phút -> loại
+        (4, 60, "M", 70.0, 170.0, 900, None, 15, "A"),           # thiếu nhãn bệnh viện -> loại
+        (5, 40, "F", 350.0, 170.0, None, "Expired", None, "c2012"),  # nguồn không ghi thời gian nằm ICU -> giữ
+    ], cot_bn)
+    sh = spark.createDataFrame([
+        (1, -10, 200.0, 70.0, 99.0, 18.0, 37.0),                 # trước lúc nhập ICU -> ngoài cửa sổ
+        (1, 0, 80.0, 60.0, 95.0, 20.0, 37.0),
+        (1, 1440, 100.0, 90.0, 97.0, 30.0, 38.0),
+        (1, 1500, 300.0, 200.0, 50.0, 60.0, 40.0),               # sau 24 giờ -> ngoài cửa sổ
+    ], ["patient_id", "observation_offset", "heartrate", "systemicmean", "sao2", "respiration", "temperature"])
+    xn = spark.createDataFrame([
+        (1, "Hgb", 10.0, 10), (1, "bedside glucose", 100.0, 20), (1, "Glucose", 200.0, 30),
+        (1, "WBC x 1000", 150.0, 40),                            # bạch cầu > 100 -> trống
+        (1, "creatinine", 2.0, 2000),                            # ngoài 24 giờ -> không tính
+        (1, "BUN", None, 50),                                    # giá trị trống -> bỏ
+    ], "patient_id long, lab_name string, lab_value double, lab_offset int")
+
+    ai = {r["patient_hash"]: r.asDict() for r in build_ai_ready.build_mortality_24h(bn, sh, xn).collect()}
+    assert build_ai_ready.build_mortality_24h(bn, sh, xn).columns == build_ai_ready.COT_AI_24H
+    assert set(ai) == {pseudonymize_id(1), pseudonymize_id(5)}
+    r = ai[pseudonymize_id(1)]
+    assert (r["source_system"], r["age"], r["male_sex"], r["gcs"], r["mortality"]) == ("eicu_demo", 70, 1, 14, 0)
+    assert r["bmi"] == 20.0                                       # 80 / 2^2
+    assert (r["heartrate_mean"], r["heartrate_min"], r["heartrate_max"]) == (90.0, 80.0, 100.0)
+    assert (r["systemicmean_max"], r["sao2_min"], r["respiration_max"], r["temperature_mean"]) == (90.0, 95.0, 30.0,
+                                                                                                   37.5)
+    assert (r["glucose_mean"], r["glucose_max"], r["hemoglobin_mean"]) == (150.0, 200.0, 10.0)
+    assert r["wbc_mean"] is None and r["creatinine_max"] is None and r["bun_mean"] is None
+    r = ai[pseudonymize_id(5)]
+    # cân nặng 350 kg ngoài [20, 300] -> bmi trống; không có sinh hiệu / xét nghiệm -> trống
+    assert (r["source_system"], r["male_sex"], r["bmi"], r["gcs"], r["mortality"]) == ("challenge2012", 0, None,
+                                                                                       None, 1)
+    assert r["heartrate_mean"] is None and r["glucose_mean"] is None
+
+
+def test_gcs_tu_bang_apache(spark):
+    from pipeline.standardize import gcs_theo_benh_nhan
+
+    eicu = spark.createDataFrame([("1", "4", "6", "5"), ("2", "-1", "6", "5"), ("3", "4", "6", "9")],
+                                 ["patientunitstayid", "eyes", "motor", "verbal"])
+    assert {r["patient_id"]: r["gcs"] for r in gcs_theo_benh_nhan(eicu).collect()} == {1: 15, 2: None, 3: None}
+    chi_tong = spark.createDataFrame([("7", "9"), ("8", "2")], ["patientunitstayid", "gcs"])   # 2 < 3 -> trống
+    assert {r["patient_id"]: r["gcs"] for r in gcs_theo_benh_nhan(chi_tong).collect()} == {7: 9, 8: None}
+
+
+def test_lam_sach_sinh_hieu(spark):
+    from pipeline.standardize import chuan_hoa_sinh_hieu
+    from governance.contracts import find_contract
+
+    v = spark.createDataFrame([("1", "5", "80", "10", "0", "3", "98.6"), ("1", "10", "10", "70", "97", "20", "25")],
+                              ["patientunitstayid", "observationoffset", "heartrate", "systemicmean", "sao2",
+                               "respiration", "temperature"])
+    v = v.withColumn("_file", F_lit("/x/hospital_A/2024-01-01_08-00-00/vitalPeriodic.csv"))
+    dong = chuan_hoa_sinh_hieu(v, find_contract("raw_vital_hospital_A")).orderBy("observation_offset").collect()
+    # Dòng 1: MAP 10 < 20, SaO2 0, nhịp thở 3 < 5 -> trống; 98,6 °F -> 37 °C
+    assert (dong[0]["heartrate"], dong[0]["systemicmean"], dong[0]["sao2"], dong[0]["respiration"]) == (
+        80.0, None, None, None)
+    assert round(dong[0]["temperature"], 1) == 37.0 and dong[0]["source_hospital"] == "A"
+    # Dòng 2: nhịp tim 10 < 20 (hợp đồng raw_vital) và nhiệt độ 25 °C < 30 -> trống
+    assert (dong[1]["heartrate"], dong[1]["temperature"], dong[1]["systemicmean"]) == (None, None, 70.0)
+
+
+def F_lit(gia_tri):
+    from pyspark.sql import functions as F
+    return F.lit(gia_tri)
+
+
+def _them_apache(mt, vien="A"):
+    """Thêm file apacheApsVar.csv (dữ liệu giả) vào mọi đợt của viện `vien` ở tầng raw rồi đăng ký lại catalog."""
+    import glob
+
+    from governance.sample_data import make_apache
+    from pipeline import ingest_raw
+
+    for thu_muc in glob.glob(os.path.join(mt["raw"], f"hospital_{vien}", "*")):
+        make_apache(pd.read_csv(os.path.join(thu_muc, "patient.csv"))).to_csv(
+            os.path.join(thu_muc, "apacheApsVar.csv"), index=False)
+    ingest_raw.register_raw_tables(mt["db"], mt["raw"])
+
+
+def test_bang_24h_qua_3_tang_va_dung_cohort(mt, spark):
+    from governance.lineage import get_impact_paths
+
+    _them_apache(mt, "A")
+    kq = standardize.main(mt["db"], mt["raw"], mt["std"], spark)
+    bang_24h = {}
+    build_ai_ready.main(mt["db"], mt["std"], mt["ai"], spark, ket_qua_24h=bang_24h)
+    ai = bang_24h["df"]
+
+    # Lô APACHE là không bắt buộc: chỉ viện A gửi, các viện khác vẫn qua cổng đủ
+    assert kq["bi_chan"] == [] and kq["trang_thai_lo"]["apache:ACCEPTED"] == 3
+    assert get_dataset("raw_apache_hospital_A", mt["db"])["row_count"] == 40
+    assert get_dataset("raw_apache_hospital_B", mt["db"]) is None
+    assert kq["phien_ban"].keys() == {"standardized_patients", "standardized_labs", "standardized_vitals"}
+
+    # Cohort: mỗi viện loại 1 người tuổi trống + 2 lượt nằm ICU < 4 giờ + 1 người thiếu nhãn bệnh viện
+    assert list(ai.columns) == build_ai_ready.COT_AI_24H and len(ai) == 95 - 3 * 4
+    assert ai["patient_hash"].str.fullmatch(r"[0-9a-f]{64}").all() and (ai["age"] >= 18).all()
+    assert int(ai["mortality"].sum()) == 6 and set(ai["source_system"]) == {"eicu_demo"}
+    # Chỉ viện A có GCS (36 người trong cohort); mỗi đợt có 1 người eyes = -1 -> GCS trống (2 người còn trong cohort)
+    assert ai["gcs"].notna().sum() == 36 - 2
+    assert ai["bmi"].between(10, 80).sum() > 0 and ai["heartrate_mean"].notna().sum() > 0
+    assert ai["respiration_mean"].notna().sum() > 0 and ai["glucose_mean"].notna().sum() > 0
+
+    # Catalog, Delta Lake, provenance: truy ngược về đủ các lô nguồn (cả lô APACHE)
+    ds = get_dataset(AI_24H, mt["db"])
+    assert ds["tier"] == "ai_ready" and ds["row_count"] == len(ai) and ds["contract"] == f"{AI_24H} v1.0"
+    assert os.path.isdir(os.path.join(mt["ai"], AI_24H, "_delta_log"))
+    phien_ban = pv.get_latest_version(AI_24H, mt["db"])
+    lo = pv.source_batches(phien_ban["id"], mt["db"])
+    assert {b["table_name"] for b in lo if "apache" in b["table_name"]} == {"raw_apache_hospital_A"}
+    assert pv.verify_version(phien_ban["id"], mt["db"])["ok"]
+    assert get_impact_paths("raw_apache_hospital_A", "eyes", mt["db"]) == [
+        "raw_apache_hospital_A.eyes -> standardized_patients.gcs -> ai_ready_mortality_24h.gcs"]
+
+    # Nhà nghiên cứu đọc được (đã giả danh), khách bị từ chối
+    assert len(read_table("researcher_bob", AI_24H, db_path=mt["db"])) == len(ai)
+    with pytest.raises(AccessDenied):
+        read_table("guest_charlie", AI_24H, db_path=mt["db"])

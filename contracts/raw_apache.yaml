@@ -1,0 +1,67 @@
+# Hợp đồng dữ liệu: bảng biến sinh lý APACHE THÔ của từng bệnh viện (eICU apacheApsVar.csv)
+# Ý nghĩa các trường: xem contracts/raw_patient.yaml
+# Bảng này KHÔNG bắt buộc phải gửi (đợt không có file apacheApsVar.csv vẫn được nhận, GCS để trống);
+# dùng để tính điểm hôn mê Glasgow (GCS) cho bảng ai_ready_mortality_24h.
+# eICU ghi -1 khi không đánh giá được thành phần GCS -> -1 nằm trong khoảng hợp lệ, bị để trống khi chuẩn hóa.
+
+name: raw_apache
+description: Biến sinh lý APACHE ngày đầu nằm ICU (thành phần GCS), mỗi lượt nằm ICU một dòng
+applies_to:
+  - raw_apache_hospital_*
+owner: Khoa hồi sức bệnh viện nguồn
+version: "1.0"
+tier: raw
+
+columns:
+  apacheapsvarid:
+    type: int
+    required: false
+    nullable: false
+    sensitive: false
+    description: Mã dòng APACHE
+
+  patientunitstayid:
+    type: int
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: true
+    description: Mã lượt nằm ICU của bệnh nhân (định danh)
+
+  eyes:
+    type: int
+    required: false
+    nullable: true
+    min: -1
+    max: 4
+    sensitive: false
+    description: GCS - mở mắt (1-4), -1 = không đánh giá được
+
+  motor:
+    type: int
+    required: false
+    nullable: true
+    min: -1
+    max: 6
+    sensitive: false
+    description: GCS - vận động (1-6), -1 = không đánh giá được
+
+  verbal:
+    type: int
+    required: false
+    nullable: true
+    min: -1
+    max: 5
+    sensitive: false
+    description: GCS - lời nói (1-5), -1 = không đánh giá được
+
+  # Nguồn chỉ ghi TỔNG điểm (Challenge 2012: tham số GCS theo thời gian, bộ chuyển lấy giá trị thấp nhất
+  # trong 24 giờ đầu)
+  gcs:
+    type: int
+    required: false
+    nullable: true
+    min: 3
+    max: 15
+    sensitive: false
+    description: Tổng điểm GCS (3-15) khi nguồn không ghi từng thành phần
