@@ -26,7 +26,7 @@ def staging(tmp_path, c2012):
     landing.mkdir()
     ky_vong = make_eav_source(landing)
     so_dong = source_adapters.chuyen_eav_long(c2012, str(landing), str(tmp_path / "staging"))
-    assert so_dong == {"patient": 12, "vital": 36, "lab": 36}
+    assert so_dong == {"patient": 12, "vital": 36, "lab": 36, "apache": 0}     # nguồn giả không ghi GCS
     return tmp_path / "staging" / "hospital_c2012", ky_vong
 
 
@@ -41,20 +41,25 @@ def test_so_dang_ky_nguon():
 def test_bo_chuyen_dua_ve_schema_chuan(staging):
     thu_muc, ky_vong = staging
     p = pd.read_csv(thu_muc / "patient.csv", dtype=str, keep_default_na=False).set_index("patientunitstayid")
-    assert list(p.columns) == ["age", "gender", "admissionweight", "unitdischargestatus"]
+    assert list(p.columns) == ["age", "gender", "admissionweight", "admissionheight", "unitdischargestatus",
+                               "hospitaldischargestatus"]
     dau = p.loc["200000"]
     # -1 -> trống; cân nặng lúc vào thiếu -> lấy giá trị hợp lệ đầu tiên (giờ thứ 2); tuổi ghi số nguyên
     assert (dau["gender"], dau["admissionweight"], dau["age"]) == ("", "77.5", "40")
     for ma, kv in ky_vong.items():
         dong = p.loc[str(ma)]
         assert (dong["unitdischargestatus"], dong["gender"] or None) == (kv["status"], kv["gender"])
+        assert dong["hospitaldischargestatus"] == kv["status"]          # cùng nhãn tử vong trong bệnh viện
         assert float(dong["admissionweight"]) == kv["weight"]
 
 
 def test_sinh_hieu_va_xet_nghiem(staging):
     thu_muc, ky_vong = staging
     v = pd.read_csv(thu_muc / "vitalPeriodic.csv")
-    assert list(v.columns) == ["patientunitstayid", "observationoffset", "heartrate"]
+    # Mỗi tham số một cột như vitalPeriodic của eICU; nguồn giả chỉ có HR nên các cột khác trống
+    assert list(v.columns) == ["patientunitstayid", "observationoffset", "heartrate", "systemicmean", "sao2",
+                               "respiration", "temperature"]
+    assert v[["systemicmean", "sao2", "respiration", "temperature"]].isna().all().all()
     dau = v[v["patientunitstayid"] == 200000]
     assert list(dau["observationoffset"]) == [10, 20, 30] and list(dau["heartrate"]) == ky_vong[200000]["hr"]
     lab = pd.read_csv(thu_muc / "lab.csv")
@@ -87,16 +92,30 @@ def test_lineage_tu_tham_so_goc_toi_ai_ready(db_path):
     assert sources.record_source_lineage(["c2012", "146"], db_path) > 20       # viện eICU không có cạnh nguồn
     duong_di = get_impact_paths("nguon_challenge2012", "Weight", db_path)
     assert duong_di == ["nguon_challenge2012.Weight -> raw_patient_hospital_c2012.admissionweight -> "
-                        "standardized_patients.weight_kg -> ai_ready_icu_mortality.weight_kg"]
-    assert get_impact_paths("nguon_challenge2012_outcomes", "In-hospital_death", db_path)[0].endswith(
-        f"{AI}.icu_mortality")
+                        "standardized_patients.weight_kg -> ai_ready_icu_mortality.weight_kg",
+                        "nguon_challenge2012.Weight -> raw_patient_hospital_c2012.admissionweight -> "
+                        "standardized_patients.weight_kg -> ai_ready_mortality_24h.bmi"]
+    # GCS: tham số gốc -> bảng APACHE (thấp nhất 24 giờ đầu) -> standardized_patients.gcs -> bảng 24h
+    assert get_impact_paths("nguon_challenge2012", "GCS", db_path) == [
+        "nguon_challenge2012.GCS -> raw_apache_hospital_c2012.gcs -> standardized_patients.gcs -> "
+        "ai_ready_mortality_24h.gcs"]
+    # Nhãn gốc chảy vào cả nhãn ICU (bảng cũ) lẫn nhãn bệnh viện (bảng 24h)
+    nhan = get_impact_paths("nguon_challenge2012_outcomes", "In-hospital_death", db_path)
+    assert any(p.endswith(f"{AI}.icu_mortality") for p in nhan)
+    assert any(p.endswith("raw_patient_hospital_c2012.hospitaldischargestatus -> standardized_patients."
+                          "hospitaldischargestatus -> ai_ready_mortality_24h.mortality") for p in nhan)
 
 
 def test_nguon_khac_dinh_nghia_nhan_thi_canh_bao(db_path):
     record_sample_lineage(db_path, ["c2012", "146"])
     assert sources.check_source_semantics(["146"], db_path) == []
     sources.check_source_semantics(["c2012"], db_path)
-    v = get_violations(db_path)[0]
-    assert (v["error_type"], v["severity"], v["affected_table"]) == ("SEMANTIC_MISMATCH", "WARNING",
-                                                                     "raw_patient_hospital_c2012")
+    theo_bang = {v["affected_table"]: v for v in get_violations(db_path)}
+    assert set(theo_bang) == {"raw_patient_hospital_c2012", "raw_vital_hospital_c2012"}
+    v = theo_bang["raw_patient_hospital_c2012"]
+    assert (v["error_type"], v["severity"]) == ("SEMANTIC_MISMATCH", "WARNING")
+    # Nhãn ICU chỉ chảy vào bảng cũ; bảng 24h dùng hospitaldischargestatus (đúng định nghĩa) nên không bị ảnh hưởng
     assert "in_hospital_death" in v["details"] and v["affected_ai_table"] == AI and v["action"] == "cảnh báo"
+    # SaO2 khí máu động mạch của Challenge 2012 so với SpO2 đo qua da của hợp đồng -> ảnh hưởng sao2_* của bảng 24h
+    v = theo_bang["raw_vital_hospital_c2012"]
+    assert "arterial_oxygen_saturation" in v["details"] and v["affected_ai_table"] == "ai_ready_mortality_24h"

@@ -48,7 +48,7 @@ def test_ho_so_pandas_co_du_thong_tin():
     p = make_patient("B")
     p.loc[0, "admissionweight"] = 0.5
     ho_so = profile_pandas(p, find_contract(BN))
-    assert ho_so["so_dong"] == 30 and ho_so["hop_dong"] == "raw_patient v1.1"
+    assert ho_so["so_dong"] == 30 and ho_so["hop_dong"] == "raw_patient v1.2"
     can_nang = ho_so["cot"]["admissionweight"]
     assert can_nang["type"] == "float" and can_nang["so_rong"] == 5        # 6 ô trống, 1 ô bị gán 0.5
     assert can_nang["vi_pham"]["plausibility.range"] == [1, [0.5]]

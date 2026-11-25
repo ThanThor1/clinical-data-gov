@@ -24,11 +24,24 @@ patient:
   age: {from: Age}                                       # đã gộp người trên 89 tuổi thành 90
   gender: {from: Gender, values: {0: Female, 1: Male}}
   admissionweight: {from: Weight, rule: first}           # giá trị Weight hợp lệ đầu tiên (kg)
+  admissionheight: {from: Height, rule: first}           # cm
+  # Nguồn chỉ có MỘT nhãn: tử vong trong bệnh viện. Đưa vào cả cột nhãn ICU (cảnh báo SEMANTIC_MISMATCH, xem
+  # semantics bên dưới) lẫn cột nhãn bệnh viện (đúng định nghĩa). Nguồn không ghi thời gian nằm ICU
+  # (unitdischargeoffset) - mọi lượt của bộ dữ liệu này đều nằm ICU ít nhất 48 giờ.
   unitdischargestatus: {from: In-hospital_death, file: outcomes, values: {0: Alive, 1: Expired}}
+  hospitaldischargestatus: {from: In-hospital_death, file: outcomes, values: {0: Alive, 1: Expired}}
 
-# Bảng vital (mỗi lần đo một dòng)
+# Bảng vital (mỗi thời điểm đo một dòng, mỗi tham số một cột)
 vital:
   heartrate: {from: HR}
+  systemicmean: {from: MAP}       # huyết áp động mạch trung bình đo xâm lấn (như systemicmean của eICU)
+  sao2: {from: SaO2}              # độ bão hòa oxy máu ĐỘNG MẠCH (khí máu), eICU là SpO2 đo qua da -> xem semantics
+  respiration: {from: RespRate}
+  temperature: {from: Temp}       # °C
+
+# Bảng APACHE (mỗi lượt nằm ICU một dòng): nguồn chỉ ghi TỔNG điểm GCS theo thời gian
+apache:
+  gcs: {from: GCS, rule: min_24h}  # GCS thấp nhất trong 24 giờ đầu ~ "tệ nhất ngày đầu" của bảng APACHE eICU
 
 # Bảng lab: tham số gốc -> labname chuẩn (tên của eICU). Đơn vị đã đối chiếu bằng trung vị với eICU
 # (ví dụ magnesium 2,0 so với 1,9 mg/dL) nên không cần đổi; nguồn nào khác đơn vị thì thêm
@@ -58,3 +71,4 @@ lab:
 
 semantics:
   unitdischargestatus: in_hospital_death     # tử vong trong BỆNH VIỆN, không phải lúc ra ICU như eICU
+  sao2: arterial_oxygen_saturation           # SaO2 khí máu động mạch, không phải SpO2 đo qua da như eICU

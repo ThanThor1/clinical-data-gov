@@ -12,6 +12,7 @@ from governance.lineage import (
 )
 
 AI = "ai_ready_icu_mortality"
+AI_24H = "ai_ready_mortality_24h"
 
 
 def test_ghi_lineage_khong_trung(db_path):
@@ -46,9 +47,11 @@ def test_bang_raw_patient_va_vital_noi_toi_ai_ready(db_path):
     for vien in "ABC":
         for loai in ("patient", "vital"):
             bang = f"raw_{loai}_hospital_{vien}"
-            assert get_affected_ai_tables(bang, db_path=db_path) == [AI], bang
+            assert get_affected_ai_tables(bang, db_path=db_path) == [AI, AI_24H], bang
         assert get_downstream_tables(f"raw_patient_hospital_{vien}", db_path=db_path) == [
-            AI, "standardized_patients"]
+            AI, AI_24H, "standardized_patients"]
+        assert get_downstream_tables(f"raw_vital_hospital_{vien}", db_path=db_path) == [
+            AI, AI_24H, "standardized_patients", "standardized_vitals"]
 
 
 def test_bang_raw_lab_toi_ai_ready_qua_standardized_labs(db_path):
@@ -56,11 +59,14 @@ def test_bang_raw_lab_toi_ai_ready_qua_standardized_labs(db_path):
     record_sample_lineage(db_path)
     for vien in "ABC":
         bang = f"raw_lab_hospital_{vien}"
-        assert get_downstream_tables(bang, db_path=db_path) == [AI, "standardized_labs"]
-        assert get_affected_ai_tables(bang, "labresult", db_path) == [AI]
+        assert get_downstream_tables(bang, db_path=db_path) == [AI, AI_24H, "standardized_labs"]
+        assert get_affected_ai_tables(bang, "labresult", db_path) == [AI, AI_24H]
         duong = get_impact_paths(bang, "labresult", db_path)
-        assert duong == [f"{bang}.labresult -> standardized_labs.lab_value -> {AI}.creatinine_max",
-                         f"{bang}.labresult -> standardized_labs.lab_value -> {AI}.glucose_mean"]
+        assert [p for p in duong if f"{AI}." in p] == [
+            f"{bang}.labresult -> standardized_labs.lab_value -> {AI}.creatinine_max",
+            f"{bang}.labresult -> standardized_labs.lab_value -> {AI}.glucose_mean"]
+        # Bảng 24h: 10 đặc trưng xét nghiệm
+        assert len([p for p in duong if f"{AI_24H}." in p]) == 10
     g = build_graph(db_path)
     assert g.has_edge("standardized_labs", AI) and g.has_edge("standardized_patients", AI)
 
@@ -85,23 +91,28 @@ def test_du_duong_di_muc_cot_cho_ca_3_vien(db_path):
             (f"raw_patient_hospital_{vien}", "patientunitstayid", "patient_hash"),
             (f"raw_vital_hospital_{vien}", "heartrate", "heartrate_mean"),
         ]:
-            assert get_affected_ai_tables(bang, cot, db_path) == [AI], (bang, cot)
+            assert get_affected_ai_tables(bang, cot, db_path) == [AI, AI_24H], (bang, cot)
             assert any(p.endswith(f"{AI}.{cot_ai}") for p in get_impact_paths(bang, cot, db_path)), (bang, cot)
 
 
 def test_tra_theo_cot(db_path):
     record_sample_lineage(db_path)
-    assert get_affected_ai_tables("raw_patient_hospital_B", "admissionweight", db_path) == [AI]
-    assert get_affected_ai_tables("raw_vital_hospital_A", "heartrate", db_path) == [AI]
+    assert get_affected_ai_tables("raw_patient_hospital_B", "admissionweight", db_path) == [AI, AI_24H]
+    assert get_affected_ai_tables("raw_vital_hospital_A", "heartrate", db_path) == [AI, AI_24H]
+    # Cột chỉ dùng cho bảng 24h
+    assert get_affected_ai_tables("raw_vital_hospital_A", "temperature", db_path) == [AI_24H]
+    assert get_affected_ai_tables("raw_apache_hospital_A", "eyes", db_path) == [AI_24H]
     duong = get_impact_paths("raw_patient_hospital_B", "admissionweight", db_path)
     assert duong == ["raw_patient_hospital_B.admissionweight -> standardized_patients.weight_kg"
-                     f" -> {AI}.weight_kg"]
+                     f" -> {AI}.weight_kg",
+                     "raw_patient_hospital_B.admissionweight -> standardized_patients.weight_kg"
+                     f" -> {AI_24H}.bmi"]
 
 
 def test_cot_chua_co_lineage_thi_tra_theo_bang(db_path):
     record_sample_lineage(db_path)
     # ethnicity không có trong lineage -> tra theo bảng (thận trọng)
-    assert get_affected_ai_tables("raw_patient_hospital_A", "ethnicity", db_path) == [AI]
+    assert get_affected_ai_tables("raw_patient_hospital_A", "ethnicity", db_path) == [AI, AI_24H]
 
 
 def test_cot_khong_chay_toi_ai_thi_khong_anh_huong(db_path):

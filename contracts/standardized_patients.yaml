@@ -1,13 +1,15 @@
 # Hợp đồng dữ liệu: bảng bệnh nhân CHUẨN HÓA (mọi bệnh viện cùng một khuôn)
 # Ý nghĩa các trường: xem contracts/raw_patient.yaml
 # v1.1: thêm source_batch (mỗi dòng biết mình đến từ đợt gửi nào -> provenance mức dòng)
+# v1.2: thêm height_cm, icu_los_min, hospitaldischargestatus, gcs (cho ai_ready_mortality_24h).
+#       min / max của các cột mới là luật LÀM SẠCH: giá trị ngoài khoảng bị để trống khi chuẩn hóa
 
 name: standardized_patients
 description: Bệnh nhân của cả 3 bệnh viện sau khi chuẩn hóa tên cột, kiểu và đơn vị
 applies_to:
   - standardized_patients
 owner: Nhóm Kỹ thuật dữ liệu (Người 1)
-version: "1.1"
+version: "1.2"
 tier: standardized
 
 columns:
@@ -83,3 +85,40 @@ columns:
     allowed_values: [Alive, Expired]
     sensitive: false
     description: Tình trạng lúc ra khỏi ICU (Alive / Expired)
+
+  # ----- v1.2 -----
+  height_cm:
+    type: float
+    required: false
+    nullable: true
+    min: 100
+    max: 250
+    sensitive: false
+    description: Chiều cao lúc nhập ICU (cm); ngoài [100, 250] -> để trống
+
+  icu_los_min:
+    type: int
+    required: false
+    nullable: true
+    min: 0
+    sensitive: false
+    description: Thời gian nằm ICU (phút), từ unitdischargeoffset; nguồn không ghi (Challenge 2012) -> trống
+
+  hospitaldischargestatus:
+    type: category
+    required: false
+    nullable: true
+    allowed_values: [Alive, Expired]
+    sensitive: false
+    description: Tình trạng lúc ra viện (Alive / Expired) - nhãn tử vong trong bệnh viện
+
+  # eICU: eyes + motor + verbal của bảng APACHE (giá trị -1 = không ghi nhận -> trống);
+  # Challenge 2012: GCS thấp nhất trong 24 giờ đầu
+  gcs:
+    type: int
+    required: false
+    nullable: true
+    min: 3
+    max: 15
+    sensitive: false
+    description: Điểm hôn mê Glasgow (3-15), tệ nhất ngày đầu nằm ICU

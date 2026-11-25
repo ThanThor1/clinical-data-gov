@@ -5,12 +5,13 @@
 Hệ thống nhận dữ liệu ICU từ **hai hệ thống nguồn khác hẳn nhau**: 186 bệnh viện của eICU-CRD Demo (CSV dạng bảng)
 và PhysioNet/CinC Challenge 2012 (4.000 lượt nằm ICU, dạng dài "thời gian, tham số, giá trị", mã hóa và định nghĩa
 nhãn khác) – tổng khoảng 2,5 triệu dòng. Dữ liệu được xử lý bằng **Apache Spark**, lưu tầng standardized / AI-ready
-thành bảng **Delta Lake**, và được kiểm soát ở mọi bước trước khi dùng cho AI (bài toán mẫu: dự đoán tử vong ICU;
-nhóm chỉ chuẩn bị dữ liệu AI-ready, không huấn luyện mô hình).
+thành bảng **Delta Lake**, và được kiểm soát ở mọi bước trước khi dùng cho AI. Tầng AI-ready có hai bảng:
+`ai_ready_icu_mortality` (6 đặc trưng, bài toán mẫu) và `ai_ready_mortality_24h` – đúng 23 đặc trưng 24 giờ đầu và
+nhãn tử vong trong bệnh viện mà mô hình XGBoost + SHAP của nhóm AI dùng (`intelligence/ml_mortality/`, mục 7.1).
 
 | Mục tiêu của đề | Làm ở đâu |
 |---|---|
-| Metadata catalog cho nguồn không đồng nhất | Sổ đăng ký nguồn `sources/*.yaml` (định dạng gốc, giấy phép, ánh xạ về schema chuẩn) + bộ chuyển `pipeline/source_adapters.py`; `catalog_access/catalog.py` – 564 bảng (561 bảng raw của 187 nguồn gửi + standardized + AI-ready): tầng, hệ thống nguồn, định dạng gốc, chủ sở hữu, cột nhạy cảm, hợp đồng, vị trí, số dòng |
+| Metadata catalog cho nguồn không đồng nhất | Sổ đăng ký nguồn `sources/*.yaml` (định dạng gốc, giấy phép, ánh xạ về schema chuẩn) + bộ chuyển `pipeline/source_adapters.py`; `catalog_access/catalog.py` – 753 bảng (748 bảng raw của 187 nguồn gửi: patient, lab, vital, APACHE + 3 bảng standardized + 2 bảng AI-ready): tầng, hệ thống nguồn, định dạng gốc, chủ sở hữu, cột nhạy cảm, hợp đồng, vị trí, số dòng |
 | Lineage / provenance | `governance/lineage.py` (cột → cột, từ **tham số gốc của nguồn** tới AI-ready; sinh từ file ánh xạ), `governance/provenance.py` (lần chạy, lô dữ liệu, checksum, phiên bản Delta, phiên bản code) |
 | Data contract + quality gate | `contracts/*.yaml`, `governance/gates.py` (gate1: schema + hợp đồng + quyền riêng tư, gate2: Kahn) trên hồ sơ dữ liệu tính bằng Spark (`governance/profiling.py`) |
 | Theo dõi thay đổi schema và phiên bản | `governance/schema_registry.py` – phát hiện đổi tên / xóa / đổi kiểu cột theo từng viện; kỹ sư dữ liệu **duyệt** đổi tên cột hợp lệ (`approve_rename`) thay cho việc bắt bệnh viện gửi lại; phiên bản bảng Delta + phiên bản code của từng lần chạy |
@@ -24,11 +25,12 @@ nhóm chỉ chuẩn bị dữ liệu AI-ready, không huấn luyện mô hình).
 ```
 data/01_landing/                       (bản gốc, KHÔNG sửa)
    ├─ patient.csv, lab.csv, vitalPeriodic.csv        eICU demo: CSV dạng bảng, 2,07 triệu dòng, 186 viện
+   ├─ apacheApsVar.csv                                eICU demo, không bắt buộc: thành phần GCS (cho bảng 24h)
    └─ challenge2012/set-a.tar.gz, Outcomes-a.txt     Challenge 2012: dạng dài Time,Parameter,Value, 4.000 lượt
    │ split_hospitals (eICU) + source_adapters (nguồn khác chuẩn, theo sources/*.yaml: đổi tên tham số,
    │ đổi mã 0/1, -1 → trống, hh:mm → phút) → cùng schema chuẩn; split_snapshots: mỗi nguồn gửi 3 đợt
    ▼
-data/raw/hospital_<mã>/<thời điểm gửi>/{patient,lab,vitalPeriodic}.csv      ← tầng RAW: 1.683 file, giữ nguyên
+data/raw/hospital_<mã>/<thời điểm gửi>/{patient,lab,vitalPeriodic,apacheApsVar}.csv   ← tầng RAW, giữ nguyên
    │ standardize  (Apache Spark, tài khoản pipeline_service)
    │   đổi tên cột đã được kỹ sư dữ liệu DUYỆT (schema_approvals) khi đọc; cảnh báo nguồn định nghĩa khác
    │   1 job Spark / loại dữ liệu: hồ sơ chất lượng của MỌI lô cùng lúc (groupBy theo file)
@@ -36,15 +38,19 @@ data/raw/hospital_<mã>/<thời điểm gửi>/{patient,lab,vitalPeriodic}.csv  
    │   – hồ sơ lưu theo checksum: lần sau chỉ tính file mới / bị sửa (xử lý tăng dần)
    │   gate1 + gate2 trên hồ sơ từng lô → ACCEPTED / BLOCKED / SKIPPED, ghi provenance từng lô
    │   chỉ lô đã qua cổng được chuẩn hóa; giá trị ngoài khoảng hợp lý → để trống
+   │   (sinh hiệu: nhiệt độ °F → °C, MAP < 20, nhịp thở < 5, ... → trống theo hợp đồng standardized_vitals)
    │   trước khi ghi: code pipeline đổi mà đầu ra lệch (cùng đầu vào) → chặn (pipeline_drift)
    ▼
-data/standardized/standardized_{patients,labs}/      (Delta Lake)            ← tầng STANDARDIZED
+data/standardized/standardized_{patients,labs,vitals}/   (Delta Lake)        ← tầng STANDARDIZED
    │ build_ai_ready  (Apache Spark)
    │   cổng provenance: bảng đầu vào phải khớp checksum một phiên bản pipeline đã ghi
    │   giả danh patient_id bằng HMAC-SHA256 (hàm có sẵn của Spark), đặc trưng xét nghiệm (groupBy)
    │   gate1 (+ luật quyền riêng tư tầng AI-ready), gate2, kiểm tra lệch đầu ra khi code đổi
+   │   bảng 24h: cohort (tuổi ≥ 18, nằm ICU ≥ 4 giờ, có nhãn), cửa sổ 0–1440 phút, 9 đặc trưng sinh hiệu +
+   │   10 đặc trưng xét nghiệm (groupBy), BMI, GCS, nhãn tử vong trong bệnh viện
    ▼
 data/ai_ready/ai_ready_icu_mortality/                 (Delta Lake)            ← tầng AI-READY
+data/ai_ready/ai_ready_mortality_24h/                 (Delta Lake)              (đầu vào mô hình XGBoost)
 
 metadata.db (SQLite, chế độ WAL): datasets, schema_versions, schema_approvals, lineage_edges, violations,
              audit_log, pipeline_runs, batch_ingestions, batch_profiles, dataset_versions,
@@ -69,6 +75,7 @@ thành ít file (khoảng 1 triệu dòng / file); Delta Lake vẫn lưu thống
 ## 2. Cấu trúc thư mục
 
 ```
+intelligence/     mô hình dự đoán tử vong (XGBoost + SHAP) của nhóm AI, đọc bảng ai_ready_mortality_24h
 catalog_access/   catalog, phân quyền (policies.yaml), đọc/ghi có kiểm soát (pandas + Spark), sổ audit, khóa bí mật
 governance/       hợp đồng, hồ sơ dữ liệu (pandas / Spark), schema registry, lineage, provenance, quyền riêng tư,
                   cổng kiểm tra, vi phạm
@@ -122,6 +129,16 @@ curl -LO https://physionet.org/files/challenge-2012/1.0.0/Outcomes-a.txt
 
 Chưa có hai file này thì pipeline vẫn chạy với riêng eICU (bộ chuyển báo "Bỏ qua nguồn challenge2012").
 
+**Bảng APACHE (không bắt buộc, cần cho cột `gcs` của bảng `ai_ready_mortality_24h`):** cùng bộ eICU-CRD Demo,
+không cần đăng ký:
+
+```bash
+cd data/01_landing
+curl -LO https://physionet.org/files/eicu-crd-demo/2.0.1/apacheApsVar.csv.gz && gunzip apacheApsVar.csv.gz
+```
+
+Chưa có file này thì pipeline vẫn chạy, cột `gcs` của phần eICU để trống.
+
 Thư mục `data/` không được commit (xem `.gitignore`). Khi dùng dữ liệu, ghi nguồn theo giấy phép: eICU-CRD Demo
 (ODbL 1.0), Challenge 2012 (ODC-By 1.0).
 
@@ -132,11 +149,11 @@ Thư mục `data/` không được commit (xem `.gitignore`). Khi dùng dữ li�
 ### 4.1. Demo một lệnh
 
 ```bash
-python run_demo.py --reset            # 186 viện eICU + Challenge 2012, khoảng 3 phút
+python run_demo.py --reset            # 186 viện eICU + Challenge 2012, khoảng 10 phút
 python run_demo.py --reset --top 3    # chạy nhanh với 3 viện eICU đông bệnh nhân nhất (+ Challenge 2012 nếu có)
 ```
 
-Chạy 8 kịch bản và in ✅ / ❌ cho từng kịch bản:
+Chạy 9 kịch bản và in ✅ / ❌ cho từng kịch bản:
 
 1. Dữ liệu thật của 187 nguồn gửi đi qua 3 tầng. Các lô kém chất lượng **có sẵn** trong eICU bị chặn đúng lô
    (6 lô vital: viện 246 thiếu 64–100% nhịp tim, 3 lô có nhiều nhịp tim < 20); 6.520 bệnh nhân lên AI-ready
@@ -144,7 +161,9 @@ Chạy 8 kịch bản và in ✅ / ❌ cho từng kịch bản:
    **1b.** Nguồn không đồng nhất: Challenge 2012 (dạng dài, giới tính 0/1, -1 là thiếu, thời gian hh:mm) được bộ
    chuyển đưa về schema chuẩn theo `sources/challenge2012.yaml`; lineage đi từ tham số gốc
    (`nguon_challenge2012.Weight → raw_patient_hospital_c2012.admissionweight → … → ai_ready_icu_mortality.weight_kg`);
-   cảnh báo `SEMANTIC_MISMATCH` vì nhãn của nguồn này là tử vong trong **bệnh viện**, không phải lúc ra ICU.
+   cảnh báo `SEMANTIC_MISMATCH` vì nhãn của nguồn này là tử vong trong **bệnh viện**, không phải lúc ra ICU
+   (chỉ ảnh hưởng bảng cũ; bảng 24h dùng đúng nhãn bệnh viện), và vì `SaO2` của nguồn này là khí máu động mạch,
+   còn hợp đồng định nghĩa `sao2` là SpO2 đo qua da (ảnh hưởng `sao2_*` của bảng 24h).
 2. Viện 123 (đông bệnh nhân thứ 2 của eICU) đổi tên cột `admissionweight → weight` ở đợt 3: bị chặn, chỉ ra bảng
    `ai_ready_icu_mortality` bị ảnh hưởng, audit có dòng BLOCKED, provenance ghi lô BLOCKED (lab / vital cùng đợt SKIPPED).
 3. Kỹ sư dữ liệu **duyệt** thay đổi đó (`weight` chính là `admissionweight`) → chạy lại → lô qua cổng mà bệnh viện
@@ -152,12 +171,15 @@ Chạy 8 kịch bản và in ✅ / ❌ cho từng kịch bản:
    từ cột `weight`.
 4. Nhà nghiên cứu đọc bảng raw bị từ chối (DENIED); chuyên viên phân tích đọc standardized nhưng cột
    `patient_id` bị ẩn.
-5. Truy ngược bảng AI-ready về 1.677 lô nguồn của 187 nguồn gửi (kèm checksum); một job Spark ngoài pipeline ghi đè
+5. Truy ngược bảng AI-ready về 2.238 lô nguồn của 187 nguồn gửi (kèm checksum); một job Spark ngoài pipeline ghi đè
    bảng standardized → tạo AI-ready bị chặn; lịch sử phiên bản Delta; phiên bản cũ vẫn kiểm tra được nhờ time travel.
 6. Sổ audit toàn vẹn; sửa một dòng trên bản sao DB → bị phát hiện.
 7. Pipeline đổi code (giả lập lỗi: chuẩn hóa cân nặng sang pound). Dữ liệu sai vẫn gần như nằm trong khoảng hợp lý
    nên cổng hợp đồng không chặn; bộ phát hiện lệch đầu ra thấy cùng đầu vào mà cân nặng trung bình +120% → chặn
    (`PIPELINE_OUTPUT_DRIFT`), tầng AI-ready giữ nguyên; sửa code chạy lại → vi phạm RESOLVED.
+8. Dữ liệu cho mô hình của nhóm AI: nhà nghiên cứu đọc `ai_ready_mortality_24h` (23 đặc trưng + nhãn) qua lớp phân
+   quyền; phần eICU **khớp đúng cohort của notebook** `process_patient.ipynb` (2.326 bệnh nhân, 191 ca tử vong);
+   truy được lô nguồn và lineage của GCS (bảng APACHE của eICU, tham số `GCS` gốc của Challenge 2012).
 
 `--reset` xóa `metadata.db` cũ trước khi chạy. Bỏ `--reset` thì chạy tiếp trên DB hiện có.
 Trong lúc chạy, giao diện Spark ở http://localhost:4040.
@@ -335,7 +357,7 @@ Mỗi hệ thống nguồn một file (`python -m governance.sources` để xem)
 | `format` | `csv_wide` (đúng schema chuẩn) hoặc `eav_long` (dạng dài, cần bộ chuyển) |
 | `landing`, `files` | thư mục và các file gốc (bộ chuyển đọc thẳng `.tar.gz`, không giải nén) |
 | `missing_value`, `id_parameter`, `time_column` | giá trị "không có" của nguồn, tham số mã lượt nằm ICU, cột thời gian `hh:mm` |
-| `patient`, `vital`, `lab` | ánh xạ: cột chuẩn ← tham số gốc (`from`), đổi mã (`values`), luật lấy giá trị (`rule: first`), labname chuẩn (`to`), hệ số đổi đơn vị (`scale`) |
+| `patient`, `vital`, `lab`, `apache` | ánh xạ: cột chuẩn ← tham số gốc (`from`), đổi mã (`values`), luật gộp nhiều lần đo (`rule: first` – giá trị đầu tiên, `rule: min_24h` – thấp nhất trong 24 giờ đầu), labname chuẩn (`to`), hệ số đổi đơn vị (`scale`) |
 | `semantics` | định nghĩa của nguồn cho các cột dễ hiểu khác nhau (so với `semantics` trong hợp đồng) |
 
 Thêm nguồn mới cùng định dạng: thêm một file YAML. Định dạng mới: thêm một hàm vào `BO_CHUYEN` của
@@ -362,6 +384,28 @@ from pipeline.spark_session import get_spark
 sdf = read_table_spark(get_spark(), "analyst_dave", "standardized_patients")
 ```
 
+### 7.1. Dùng cho mô hình của nhóm AI (`intelligence/ml_mortality/`)
+
+Bảng `ai_ready_mortality_24h` thay cho bước 1–5 của các notebook (`process_patient`, `process_apache`,
+`process_vital`, `process_lab`, `merge_features`): cùng cohort, cùng cửa sổ 24 giờ, cùng luật làm sạch, cùng tên
+23 đặc trưng, nhưng dữ liệu đã đi qua cổng kiểm tra, đã giả danh hóa và truy được nguồn gốc. Bước 6 trở đi
+(`split_data`, `train_xgboost`, `explain_shap`) giữ nguyên, chỉ đổi chỗ đọc dữ liệu:
+
+```python
+from catalog_access import read_table
+from pipeline.build_ai_ready import DAC_TRUNG_24H     # 23 đặc trưng, đúng thứ tự của merge_features
+
+df = read_table("researcher_bob", "ai_ready_mortality_24h")      # có kiểm tra quyền + ghi audit
+# df = df[df["source_system"] == "eicu_demo"]                     # chỉ eICU = đúng cohort của bài báo (2.326)
+X, y = df[DAC_TRUNG_24H], df["mortality"]
+# Khóa của từng bệnh nhân (ví dụ test_shap_top5.csv) là patient_hash, không còn patientunitstayid
+```
+
+Khác với notebook: khóa bệnh nhân là `patient_hash` (luật quyền riêng tư của tầng AI-ready); nhịp tim < 20 bị để
+trống (hợp đồng `raw_vital`, notebook chỉ bỏ ≤ 0); có thêm 4.000 lượt nằm ICU của Challenge 2012 (cột
+`source_system`) – nguồn này không đo hemoglobin, `sao2` là khí máu động mạch, không ghi thời gian nằm ICU (mọi
+lượt đều ≥ 48 giờ nên được giữ trong cohort). Muốn so với bài báo thì lọc `source_system == "eicu_demo"`.
+
 **Khi có vi phạm BREAKING:** mở dashboard trang *Vi phạm* (mặc định lọc vi phạm đang mở) → xem bảng, cột, lô gây
 lỗi (`hospital_<mã>/<thời điểm gửi>`) và bảng AI-ready bị ảnh hưởng, rồi:
 - dữ liệu sai → báo bệnh viện gửi lại → chạy lại pipeline;
@@ -386,6 +430,9 @@ Không chạy `VACUUM` trên bảng Delta nếu còn muốn kiểm tra lại phi
 ---
 
 ## 8. Kết quả đánh giá (`python run_eval.py`)
+
+> Số liệu bên dưới đo **trước** khi thêm bảng APACHE và bảng `ai_ready_mortality_24h` (tầng raw lúc đó có 1.683
+> file, nay 2.244 file). Chạy lại `python run_eval.py` để cập nhật trước khi đưa vào báo cáo.
 
 Chạy trên toàn bộ dữ liệu: 186 bệnh viện eICU + nguồn Challenge 2012 (187 nguồn gửi), 561 đợt gửi, 1.683 file,
 khoảng 2,54 triệu dòng; Spark `local[*]` trên laptop 12 core; cả lần đánh giá mất khoảng 13 phút.
@@ -421,8 +468,11 @@ khoảng 2,54 triệu dòng; Spark `local[*]` trên laptop 12 core; cả lần �
 - 186 "bệnh viện" eICU có cùng cấu trúc; tính không đồng nhất thật đến từ nguồn thứ hai (Challenge 2012: khác định
   dạng, tên biến, mã hóa, giá trị thiếu, cách ghi thời gian, định nghĩa nhãn). Nguồn này được coi là một "viện"
   (`c2012`) gửi 3 đợt. Bộ chuyển mới hỗ trợ dạng `eav_long`; định dạng khác (FHIR, HL7) cần thêm bộ chuyển.
-- Khác biệt về định nghĩa (nhãn tử vong ICU so với tử vong bệnh viện) chỉ được cảnh báo, không tự sửa: tầng AI-ready
-  đang gộp hai định nghĩa, người dùng dữ liệu cần lọc theo nguồn nếu bài toán đòi hỏi.
+- Khác biệt về định nghĩa (nhãn tử vong ICU so với tử vong bệnh viện, SaO2 khí máu so với SpO2 đo qua da) chỉ được
+  cảnh báo, không tự sửa: bảng `ai_ready_icu_mortality` gộp hai định nghĩa nhãn, cột `sao2_*` của bảng 24h gộp hai
+  cách đo; người dùng dữ liệu cần lọc theo `source_system` nếu bài toán đòi hỏi.
+- Bảng `ai_ready_mortality_24h`: Challenge 2012 không ghi thời gian nằm ICU nên điều kiện "nằm ICU ≥ 4 giờ" dựa vào
+  mô tả của bộ dữ liệu (mọi lượt ≥ 48 giờ); không đo hemoglobin nên `hemoglobin_mean` trống với nguồn này.
 - Bộ phát hiện lệch đầu ra so số dòng, kiểu, % ô trống và trung bình cột số với ngưỡng cố định (20%, 10 điểm):
   lỗi code chỉ đổi phân phối của cột chữ (ví dụ đảo mã giới tính) hoặc lệch nhỏ hơn ngưỡng sẽ không bị bắt;
   khi cả code lẫn dữ liệu đầu vào cùng đổi thì chỉ cảnh báo, không chặn.

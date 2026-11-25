@@ -69,4 +69,4 @@ def test_du_lieu_that_vien_hang_2_doi_ten_bi_chan(db_path, raw):
     assert dat is False
     v = get_violations(db_path)[0]
     assert (v["error_type"], v["severity"], v["hospital"], v["affected_ai_table"]) == (
-        "SCHEMA_COLUMN_RENAMED", "BREAKING", f"Bệnh viện {vien}", "ai_ready_icu_mortality")
+        "SCHEMA_COLUMN_RENAMED", "BREAKING", f"Bệnh viện {vien}", "ai_ready_icu_mortality,ai_ready_mortality_24h")

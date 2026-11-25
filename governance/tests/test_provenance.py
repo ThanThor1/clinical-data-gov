@@ -133,4 +133,5 @@ def test_cong_provenance(db_path, chuoi_3_tang):
         f.write("3,999\n")
     assert pv.verify_input("standardized_patients", duong_dan, db_path) is None
     v = get_violations(db_path)[0]
-    assert (v["error_type"], v["severity"], v["affected_ai_table"]) == ("PROVENANCE_UNVERIFIED", "BREAKING", AI)
+    assert (v["error_type"], v["severity"], v["affected_ai_table"]) == ("PROVENANCE_UNVERIFIED", "BREAKING",
+                                                                       f"{AI},ai_ready_mortality_24h")

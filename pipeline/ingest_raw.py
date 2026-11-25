@@ -1,8 +1,8 @@
 """
 Nạp dữ liệu vào tầng RAW (giữ nguyên bản gốc như bệnh viện gửi lên):
   1. split_snapshots: chia dữ liệu mỗi viện thành 3 đợt gửi
-     -> data/raw/hospital_<mã>/<YYYY-MM-DD_HH-MM-SS>/{patient,lab,vitalPeriodic}.csv
-  2. Đăng ký 3 bảng raw cho mỗi viện (186 viện eICU + nguồn khác) vào catalog bằng register_dataset;
+     -> data/raw/hospital_<mã>/<YYYY-MM-DD_HH-MM-SS>/{patient,lab,vitalPeriodic}.csv (+ apacheApsVar.csv nếu có)
+  2. Đăng ký 3 bảng raw (+ bảng APACHE nếu viện có gửi) cho mỗi viện (186 viện eICU + nguồn khác) vào catalog bằng register_dataset;
      cột nhạy cảm, mô tả, hợp đồng lấy từ hợp đồng dữ liệu (contracts/*.yaml), hệ thống nguồn và định dạng
      gốc lấy từ sổ đăng ký nguồn (sources/*.yaml).
      Vị trí file là mẫu data/raw/hospital_<mã>/*/<file>.csv (mỗi đợt một thư mục),
@@ -33,6 +33,7 @@ OWNER_THEO_LOAI = {
     "patient": "Đội IT",
     "lab": "Khoa xét nghiệm",
     "vital": "Đơn vị ICU",
+    "apache": "Khoa hồi sức",
 }
 
 # Loại dữ liệu -> tên file trong thư mục đợt. Tên bảng logic là raw_<loại>_hospital_<mã>
@@ -41,7 +42,11 @@ FILE_THEO_LOAI = {
     "patient": "patient.csv",
     "lab": "lab.csv",
     "vital": "vitalPeriodic.csv",
+    "apache": "apacheApsVar.csv",
 }
+
+# Loại dữ liệu không bắt buộc: đợt không gửi file này vẫn được nhận; viện chưa từng gửi thì không đăng ký bảng
+LOAI_TUY_CHON = ("apache",)
 
 
 def _dem_dong(duong_dan):
@@ -51,7 +56,7 @@ def _dem_dong(duong_dan):
 
 
 def register_raw_tables(db_path=None, raw_dir=None):
-    """Đăng ký 3 bảng raw cho mỗi viện có trong raw_dir. Trả về danh sách tên bảng đã đăng ký."""
+    """Đăng ký các bảng raw cho mỗi viện có trong raw_dir. Trả về danh sách tên bảng đã đăng ký."""
     raw_dir = raw_dir or RAW_DIR
     cac_vien = danh_sach_vien(raw_dir)
     da_dang_ky = []
@@ -60,7 +65,10 @@ def register_raw_tables(db_path=None, raw_dir=None):
         for loai, bo_phan in OWNER_THEO_LOAI.items():
             ten_bang = f"raw_{loai}_hospital_{vien}"
             mau_file = os.path.join(raw_dir, f"hospital_{vien}", "*", FILE_THEO_LOAI[loai])
-            so_dong = sum(_dem_dong(f) for f in glob.glob(mau_file))
+            cac_file = glob.glob(mau_file)
+            if not cac_file and loai in LOAI_TUY_CHON:
+                continue
+            so_dong = sum(_dem_dong(f) for f in cac_file)
             thong_tin = catalog_metadata(ten_bang)
             register_dataset(
                 ten_bang,

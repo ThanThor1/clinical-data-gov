@@ -16,10 +16,11 @@ Dữ liệu thật (eICU demo): 186 bệnh viện x 3 đợt x 3 loại = 1.674 
      của lô (file, SHA-256, số dòng, ACCEPTED / BLOCKED / SKIPPED).
   4. Spark đọc lại CHỈ các lô đã qua cổng và chuẩn hóa: đổi tên cột, '> 89' -> 90, Male/Female -> M/F/U,
      giá trị ngoài khoảng hợp lý của hợp đồng -> để trống (đã cảnh báo ở gate2), nhịp tim trung bình
-     mỗi bệnh nhân.
+     mỗi bệnh nhân, GCS từ bảng APACHE (không bắt buộc), sinh hiệu dạng dài (nhiệt độ °F -> °C, giá trị phi
+     sinh lý -> trống theo luật làm sạch của hợp đồng standardized_vitals).
   5. Cổng kiểm tra tầng standardized (gate1, gate2, rồi lệch đầu ra khi code pipeline đổi - xem
-     governance/pipeline_drift.py), ghi 2 bảng Delta Lake qua write_table_spark, ghi phiên bản
-     (dataset_versions, kèm số phiên bản Delta, phiên bản code, hồ sơ đầu ra) cùng danh sách lô đầu vào.
+     governance/pipeline_drift.py), ghi 3 bảng Delta Lake (patients, labs, vitals) qua write_table_spark, ghi
+     phiên bản (dataset_versions, kèm số phiên bản Delta, phiên bản code, hồ sơ đầu ra) cùng danh sách lô đầu vào.
 
 Chạy: python -m pipeline.standardize   (từ gốc repo)
 """
@@ -45,7 +46,7 @@ from governance.profiling import empty_profile, load_cached_profiles, profile_sp
 from governance.provenance import batch_context, file_checksum, pipeline_run, record_batch, record_dataset_version
 from governance.schema_registry import get_latest_schema, get_schema_approvals
 from governance.sources import check_source_semantics, record_source_lineage
-from pipeline.ingest_raw import FILE_THEO_LOAI
+from pipeline.ingest_raw import FILE_THEO_LOAI, LOAI_TUY_CHON
 from pipeline.inject_errors import loi_pipeline
 from pipeline.spark_session import get_spark
 from pipeline.split_snapshots import danh_sach_vien
@@ -220,6 +221,13 @@ def _lam_sach(cot_so, luat):
     return F.when(ngoai, F.lit(None).cast("double")).otherwise(cot_so)
 
 
+def _cot(df, ten):
+    """Cột `ten` của DataFrame; không file nào có cột này (cột không bắt buộc) -> cột trống kiểu chuỗi."""
+    from pyspark.sql import functions as F
+
+    return df[ten] if ten in df.columns else F.lit(None).cast("string")
+
+
 def _nguon(df):
     """Cột source_hospital, source_batch lấy từ đường dẫn file gửi lên."""
     from pyspark.sql import functions as F
@@ -229,9 +237,10 @@ def _nguon(df):
             F.concat(F.lit("hospital_"), vien, F.lit("/"), F.regexp_extract("_file", MAU_FILE, 2)).alias("source_batch")]
 
 
-def chuan_hoa_benh_nhan(p, hop_dong_raw):
+def chuan_hoa_benh_nhan(p, hop_dong_raw, hop_dong_std=None):
     from pyspark.sql import functions as F
 
+    luat_std = (hop_dong_std or find_contract("standardized_patients"))["columns"]
     tuoi = F.trim(p["age"])
     gioi = F.trim(p["gender"])
     can_nang = _lam_sach(p["admissionweight"].try_cast("double"), hop_dong_raw["columns"]["admissionweight"])
@@ -239,12 +248,16 @@ def chuan_hoa_benh_nhan(p, hop_dong_raw):
         can_nang = can_nang * 2.20462
     return p.select(
         p["patientunitstayid"].try_cast("long").alias("patient_id"),
-        # age: "> 89" -> 90, ép số, giữ trống
-        F.when(tuoi == "> 89", F.lit(90)).otherwise(tuoi.try_cast("int")).alias("age"),
+        # age: "> 89" -> 90, ép số (chấp nhận cả "40.0" khi file bị công cụ khác ghi lại), giữ trống
+        F.when(tuoi == "> 89", F.lit(90)).otherwise(tuoi.try_cast("double").cast("int")).alias("age"),
         F.when(gioi == "Male", "M").when(gioi == "Female", "F").otherwise("U").alias("gender"),
         can_nang.alias("weight_kg"),
         F.trim(p["unitdischargestatus"]).alias("unitdischargestatus"),
         *_nguon(p),
+        # Cột không bắt buộc cho bảng ai_ready_mortality_24h (nguồn không gửi -> trống)
+        _lam_sach(_cot(p, "admissionheight").try_cast("double"), luat_std["height_cm"]).alias("height_cm"),
+        _cot(p, "unitdischargeoffset").try_cast("int").alias("icu_los_min"),
+        F.trim(_cot(p, "hospitaldischargestatus")).alias("hospitaldischargestatus"),
     )
 
 
@@ -256,13 +269,67 @@ def nhip_tim_trung_binh(v, hop_dong_raw):
             .groupBy("patient_id").agg(F.avg("heartrate").alias("heartrate_mean")))
 
 
+def gcs_theo_benh_nhan(apache, hop_dong_std=None):
+    """
+    Điểm GCS mỗi bệnh nhân từ bảng APACHE: eyes + motor + verbal (thành phần -1 = không đánh giá -> trống),
+    nguồn chỉ ghi tổng thì lấy cột gcs; ngoài [3, 15] -> trống. Nhiều dòng một bệnh nhân -> lấy điểm thấp nhất.
+    """
+    from pyspark.sql import functions as F
+
+    luat = (hop_dong_std or find_contract("standardized_patients"))["columns"]["gcs"]
+    thanh_phan = [F.when(_cot(apache, c).try_cast("int") >= 1, _cot(apache, c).try_cast("int"))
+                  for c in ("eyes", "motor", "verbal")]
+    tong = thanh_phan[0] + thanh_phan[1] + thanh_phan[2]
+    gcs = _lam_sach(F.coalesce(tong, _cot(apache, "gcs").try_cast("int")).cast("double"), luat)
+    return (apache.select(apache["patientunitstayid"].try_cast("long").alias("patient_id"), gcs.alias("gcs"))
+            .groupBy("patient_id").agg(F.min("gcs").cast("int").alias("gcs")))
+
+
+def chuan_hoa_sinh_hieu(v, hop_dong_raw, hop_dong_std=None):
+    """
+    Sinh hiệu dạng dài (mỗi lần đo một dòng). Nhịp tim làm sạch theo hợp đồng raw_vital (giống heartrate_mean);
+    các cột khác theo luật làm sạch của hợp đồng standardized_vitals; nhiệt độ > 45 coi là °F, đổi sang °C trước.
+    """
+    from pyspark.sql import functions as F
+
+    luat = (hop_dong_std or find_contract("standardized_vitals"))["columns"]
+    so = {c: _cot(v, c).try_cast("double") for c in ("systemicmean", "sao2", "respiration", "temperature")}
+    nhiet_do = F.when(so["temperature"] > 45, (so["temperature"] - 32) * 5 / 9).otherwise(so["temperature"])
+    return v.select(
+        v["patientunitstayid"].try_cast("long").alias("patient_id"),
+        v["observationoffset"].try_cast("int").alias("observation_offset"),
+        _lam_sach(v["heartrate"].try_cast("double"), hop_dong_raw["columns"]["heartrate"]).alias("heartrate"),
+        _lam_sach(so["systemicmean"], luat["systemicmean"]).alias("systemicmean"),
+        _lam_sach(so["sao2"], luat["sao2"]).alias("sao2"),
+        _lam_sach(so["respiration"], luat["respiration"]).alias("respiration"),
+        _lam_sach(nhiet_do, luat["temperature"]).alias("temperature"),
+        *_nguon(v),
+    )
+
+
 def chuan_hoa_xet_nghiem(lab):
     return lab.select(
         lab["patientunitstayid"].try_cast("long").alias("patient_id"),
         lab["labname"].alias("lab_name"),
         lab["labresult"].try_cast("double").alias("lab_value"),
+        lab["labresultoffset"].try_cast("int").alias("lab_offset"),
         *_nguon(lab),
     )
+
+
+def dem_lam_sach_sinh_hieu(v, sinh_hieu):
+    """Số ô sinh hiệu bị để trống vì phi sinh lý, và số ô nhiệt độ đã đổi °F -> °C (một job Spark)."""
+    from pyspark.sql import functions as F
+
+    goc = v.select(*[_cot(v, c).try_cast("double").alias(c)
+                     for c in ("systemicmean", "sao2", "respiration", "temperature")])
+    sach = sinh_hieu.select("systemicmean", "sao2", "respiration", "temperature")
+    dong_goc = goc.agg(*[F.count(c).alias(c) for c in goc.columns],
+                       F.count(F.when(F.col("temperature") > 45, 1)).alias("doi_f")).first()
+    dong_sach = sach.agg(*[F.count(c).alias(c) for c in sach.columns]).first()
+    ket_qua = {c: dong_goc[c] - dong_sach[c] for c in sach.columns}
+    ket_qua["temperature_doi_F_sang_C"] = dong_goc["doi_f"]
+    return ket_qua
 
 
 def register_standardized(table_name, file_path, row_count, db_path=None):
@@ -368,7 +435,7 @@ def _chuan_hoa(spark, db_path, raw_dir, std_dir):
                     trang_thai[("patient", "ACCEPTED" if dat_p else "BLOCKED")] += 1
                 if not dat_p:
                     ket_qua["bi_chan"].append(f"raw_patient_hospital_{vien} / {dot}")
-                    for loai in ("vital", "lab"):
+                    for loai in ("vital", "lab", *LOAI_TUY_CHON):
                         if loai in lo:
                             ghi_lo_bo_qua(lo[loai], db_path)
                             trang_thai[(loai, "SKIPPED")] += 1
@@ -377,8 +444,10 @@ def _chuan_hoa(spark, db_path, raw_dir, std_dir):
                 ma_lo["patient"].append(ma)
 
                 dot_dat = True
-                for loai in ("vital", "lab"):
+                for loai in ("vital", "lab", *LOAI_TUY_CHON):
                     f = lo.get(loai)
+                    if f is None and loai in LOAI_TUY_CHON:
+                        continue                         # bảng không bắt buộc: đợt không gửi vẫn được nhận
                     if f is None:
                         dot_dat = False
                         ket_qua["bi_chan"].append(f"raw_{loai}_hospital_{vien} / {dot} (thiếu file)")
@@ -407,18 +476,29 @@ def _chuan_hoa(spark, db_path, raw_dir, std_dir):
 
     # Chuẩn hóa bằng Spark, chỉ trên các lô đã qua cổng
     benh_nhan = chuan_hoa_benh_nhan(doc_csv_spark(spark, chap_nhan["patient"]), hop_dong["patient"])
-    if chap_nhan["vital"]:
-        benh_nhan = benh_nhan.join(nhip_tim_trung_binh(doc_csv_spark(spark, chap_nhan["vital"]), hop_dong["vital"]),
+    vital_raw = doc_csv_spark(spark, chap_nhan["vital"]) if chap_nhan["vital"] else None
+    # Sinh hiệu dạng dài, giữ trong bộ nhớ: dùng cho heartrate_mean, hồ sơ cho cổng, rồi ghi Delta
+    sinh_hieu = chuan_hoa_sinh_hieu(vital_raw, hop_dong["vital"]).cache() if vital_raw is not None else None
+    if sinh_hieu is not None:
+        # Cùng luật làm sạch nhịp tim với nhip_tim_trung_binh (hợp đồng raw_vital), không phải đọc lại CSV
+        benh_nhan = benh_nhan.join(sinh_hieu.groupBy("patient_id").agg(F.avg("heartrate").alias("heartrate_mean")),
                                    "patient_id", "left")
     else:
         benh_nhan = benh_nhan.withColumn("heartrate_mean", F.lit(None).cast("double"))
+    # GCS từ bảng APACHE (không bắt buộc): chỉ các lô APACHE đã qua cổng
+    apache = [f for f in chap_nhan["apache"] if f.tieu_de]
+    if apache:
+        benh_nhan = benh_nhan.join(gcs_theo_benh_nhan(doc_csv_spark(spark, apache)), "patient_id", "left")
+    else:
+        benh_nhan = benh_nhan.withColumn("gcs", F.lit(None).cast("int"))
     # Giữ trong bộ nhớ: mỗi bảng được dùng 2 lần (lập hồ sơ cho cổng, rồi ghi Delta)
     benh_nhan = benh_nhan.cache()
     xet_nghiem = chuan_hoa_xet_nghiem(doc_csv_spark(spark, chap_nhan["lab"])).cache() if chap_nhan["lab"] else None
     try:
         # Tầng standardized cũng phải qua cả gate1 (schema) và gate2 (chất lượng)
-        dau_vao_p = [("batch", m) for m in ma_lo["patient"] + ma_lo["vital"]]
+        dau_vao_p = [("batch", m) for m in ma_lo["patient"] + ma_lo["vital"] + ma_lo["apache"]]
         dau_vao_l = [("batch", m) for m in ma_lo["lab"]]
+        dau_vao_v = [("batch", m) for m in ma_lo["vital"]]
         ho_so_p = profile_spark(benh_nhan, find_contract("standardized_patients"))
         if not check_both_gates("standardized_patients", ho_so_p, db_path, dau_vao_p):
             print("STANDARDIZED_PATIENTS BỊ CHẶN, không ghi bảng.")
@@ -427,6 +507,10 @@ def _chuan_hoa(spark, db_path, raw_dir, std_dir):
         if ho_so_l is not None and not check_both_gates("standardized_labs", ho_so_l, db_path, dau_vao_l):
             print("STANDARDIZED_LABS BỊ CHẶN, không ghi bảng.")
             ho_so_l = None
+        ho_so_v = profile_spark(sinh_hieu, find_contract("standardized_vitals")) if sinh_hieu is not None else None
+        if ho_so_v is not None and not check_both_gates("standardized_vitals", ho_so_v, db_path, dau_vao_v):
+            print("STANDARDIZED_VITALS BỊ CHẶN, không ghi bảng.")
+            ho_so_v = None
 
         # Ghi bảng Delta, ghi provenance và đăng ký catalog (chỉ bảng đã qua cổng)
         ket_qua["phien_ban"]["standardized_patients"] = _ghi_bang_standardized(
@@ -434,14 +518,19 @@ def _chuan_hoa(spark, db_path, raw_dir, std_dir):
         if ho_so_l is not None:
             ket_qua["phien_ban"]["standardized_labs"] = _ghi_bang_standardized(
                 spark, "standardized_labs", xet_nghiem, ho_so_l, dau_vao_l, std_dir, db_path)
+        if ho_so_v is not None:
+            ket_qua["phien_ban"]["standardized_vitals"] = _ghi_bang_standardized(
+                spark, "standardized_vitals", sinh_hieu, ho_so_v, dau_vao_v, std_dir, db_path)
+            ket_qua["lam_sach"].update(dem_lam_sach_sinh_hieu(vital_raw, sinh_hieu))
     finally:
-        benh_nhan.unpersist()
-        if xet_nghiem is not None:
-            xet_nghiem.unpersist()
+        for bang in (benh_nhan, xet_nghiem, sinh_hieu):
+            if bang is not None:
+                bang.unpersist()
 
     ket_qua["so_dong"] = ho_so_p["so_dong"]
     print(f"Đã lưu standardized (Delta Lake): {ho_so_p['so_dong']} bệnh nhân"
           + (f", {ho_so_l['so_dong']} dòng xét nghiệm" if ho_so_l else "")
+          + (f", {ho_so_v['so_dong']} dòng sinh hiệu" if ho_so_v else "")
           + f"; làm sạch giá trị ngoài khoảng hợp lý: {ket_qua['lam_sach']}")
     return ket_qua
 

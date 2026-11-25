@@ -2,7 +2,8 @@
 Bộ chuyển nguồn: đưa dữ liệu của các nguồn KHÔNG theo schema chuẩn về schema chuẩn của tầng raw, theo đúng
 khai báo trong sổ đăng ký nguồn (sources/*.yaml, đọc bằng governance/sources.py).
 
-Kết quả ghi vào data/02_staging/hospital_<mã>/{patient,lab,vitalPeriodic}.csv giống phần của eICU
+Kết quả ghi vào data/02_staging/hospital_<mã>/{patient,lab,vitalPeriodic}.csv (+ apacheApsVar.csv khi nguồn
+có khai báo `apache`) giống phần của eICU
 (pipeline/split_hospitals.py), nên các bước sau (chia 3 đợt, nạp raw, cổng kiểm tra, chuẩn hóa, AI-ready)
 dùng chung cho mọi nguồn. Phải chạy SAU split_hospitals (bước đó xóa mọi thư mục hospital_* trong staging).
 
@@ -60,6 +61,38 @@ def _so_nguyen_neu_duoc(cot: pd.Series) -> pd.Series:
     return cot
 
 
+# Luật gộp nhiều lần đo thành MỘT giá trị mỗi lượt nằm ICU (trường `rule` trong file ánh xạ)
+#   first  : giá trị hợp lệ đầu tiên theo thời gian (mặc định)
+#   min_24h: giá trị thấp nhất trong 24 giờ đầu (0 <= phút <= 1440), ví dụ GCS tệ nhất ngày đầu như bảng APACHE
+CUA_SO_24H = 24 * 60
+
+
+def _mot_gia_tri(su_kien: pd.DataFrame, tham_so: str, luat: str) -> pd.Series:
+    """Một giá trị mỗi lượt nằm ICU (index _id) của tham số `tham_so` theo luật gộp."""
+    phan = su_kien[su_kien["Parameter"] == tham_so]
+    if luat == "min_24h":
+        return phan[phan["_phut"].between(0, CUA_SO_24H)].groupby("_id")["Value"].min()
+    if luat == "first":
+        return phan.groupby("_id")["Value"].first()
+    raise ValueError(f"Luật gộp '{luat}' không hỗ trợ (chỉ có first, min_24h)")
+
+
+def _bang_mot_dong(su_kien: pd.DataFrame, cac_id, anh_xa: dict, ma_id: str, ket_qua_dieu_tri) -> pd.DataFrame:
+    """Bảng mỗi lượt nằm ICU một dòng (patient, apache) theo ánh xạ {cột chuẩn: {from, rule, values, file}}."""
+    bang = pd.DataFrame(index=pd.Index(cac_id, name="_id"))
+    for cot, luat in anh_xa.items():
+        if luat["from"] == ma_id:
+            gia_tri = pd.Series(bang.index, index=bang.index)
+        elif luat.get("file") == "outcomes":
+            gia_tri = ket_qua_dieu_tri[luat["from"]].reindex(bang.index)
+        else:
+            gia_tri = _mot_gia_tri(su_kien, luat["from"], luat.get("rule", "first")).reindex(bang.index)
+        if "values" in luat:
+            gia_tri = _doi_ma(gia_tri, luat["values"])
+        bang[cot] = _so_nguyen_neu_duoc(gia_tri)
+    return bang
+
+
 def chuyen_eav_long(nguon: dict, landing_dir: str, staging_dir: str) -> dict:
     """Chuyển một nguồn eav_long về schema chuẩn, ghi staging/hospital_<mã>/. Trả về số dòng từng bảng."""
     if len(nguon["hospitals"]) != 1:
@@ -73,25 +106,21 @@ def chuyen_eav_long(nguon: dict, landing_dir: str, staging_dir: str) -> dict:
     if "outcomes" in nguon.get("files", {}):
         ket_qua_dieu_tri = pd.read_csv(os.path.join(landing_dir, nguon["files"]["outcomes"])).set_index(ma_id)
 
-    # Bảng patient: mỗi lượt nằm ICU một dòng; giá trị là giá trị hợp lệ ĐẦU TIÊN theo thời gian
-    benh_nhan = pd.DataFrame(index=pd.Index(sorted(su_kien["_id"].unique()), name="_id"))
-    for cot, luat in nguon["patient"].items():
-        if luat["from"] == ma_id:
-            gia_tri = pd.Series(benh_nhan.index, index=benh_nhan.index)
-        elif luat.get("file") == "outcomes":
-            gia_tri = ket_qua_dieu_tri[luat["from"]].reindex(benh_nhan.index)
-        else:
-            gia_tri = su_kien[su_kien["Parameter"] == luat["from"]].groupby("_id")["Value"].first().reindex(benh_nhan.index)
-        if "values" in luat:
-            gia_tri = _doi_ma(gia_tri, luat["values"])
-        benh_nhan[cot] = _so_nguyen_neu_duoc(gia_tri)
+    # Bảng patient: mỗi lượt nằm ICU một dòng; mặc định là giá trị hợp lệ ĐẦU TIÊN theo thời gian
+    cac_id = sorted(su_kien["_id"].unique())
+    benh_nhan = _bang_mot_dong(su_kien, cac_id, nguon["patient"], ma_id, ket_qua_dieu_tri)
 
-    # Sinh hiệu và xét nghiệm: mỗi lần đo một dòng
-    sinh_hieu = pd.DataFrame({"patientunitstayid": [], "observationoffset": []})
+    # Sinh hiệu: mỗi thời điểm đo một dòng, mỗi tham số một cột (như vitalPeriodic của eICU). Hai lần đo cùng
+    # tham số trong cùng một phút -> lấy lần ghi đầu tiên.
+    tham_so_vital = {luat["from"]: cot for cot, luat in nguon["vital"].items()}
+    phan = su_kien[su_kien["Parameter"].isin(tham_so_vital)]
+    rong = phan.groupby(["_id", "_phut", "Parameter"], sort=True)["Value"].first().unstack("Parameter")
+    sinh_hieu = pd.DataFrame({"patientunitstayid": rong.index.get_level_values("_id"),
+                              "observationoffset": rong.index.get_level_values("_phut")})
     for cot, luat in nguon["vital"].items():
-        phan = su_kien[su_kien["Parameter"] == luat["from"]]
-        sinh_hieu = pd.DataFrame({"patientunitstayid": phan["_id"], "observationoffset": phan["_phut"],
-                                  cot: _so_nguyen_neu_duoc(phan["Value"])})
+        gia_tri = rong[luat["from"]] if luat["from"] in rong.columns else pd.Series(index=rong.index, dtype=float)
+        sinh_hieu[cot] = _so_nguyen_neu_duoc(gia_tri.reset_index(drop=True))
+
     phan = su_kien[su_kien["Parameter"].isin(nguon["lab"])]
     luat_lab = phan["Parameter"].map(nguon["lab"])
     xet_nghiem = pd.DataFrame({"patientunitstayid": phan["_id"], "labresultoffset": phan["_phut"],
@@ -103,7 +132,14 @@ def chuyen_eav_long(nguon: dict, landing_dir: str, staging_dir: str) -> dict:
     benh_nhan.to_csv(os.path.join(thu_muc, "patient.csv"), index=False)
     sinh_hieu.to_csv(os.path.join(thu_muc, "vitalPeriodic.csv"), index=False)
     xet_nghiem.to_csv(os.path.join(thu_muc, "lab.csv"), index=False)
-    return {"patient": len(benh_nhan), "vital": len(sinh_hieu), "lab": len(xet_nghiem)}
+    so_dong = {"patient": len(benh_nhan), "vital": len(sinh_hieu), "lab": len(xet_nghiem)}
+    if nguon.get("apache"):
+        # Bảng APACHE: chỉ giữ lượt nằm ICU có ít nhất một giá trị (như eICU: không đánh giá thì không có dòng)
+        apache = _bang_mot_dong(su_kien, cac_id, {"patientunitstayid": {"from": ma_id}, **nguon["apache"]}, ma_id,
+                                ket_qua_dieu_tri).dropna(subset=list(nguon["apache"]), how="all")
+        apache.to_csv(os.path.join(thu_muc, "apacheApsVar.csv"), index=False)
+        so_dong["apache"] = len(apache)
+    return so_dong
 
 
 BO_CHUYEN = {"eav_long": chuyen_eav_long}

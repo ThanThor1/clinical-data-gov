@@ -10,6 +10,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STAGING_DIR = os.path.join(ROOT, "data", "02_staging")
 SAVE_DIR = os.path.join(ROOT, "data", "raw")
 
+# File không bắt buộc của mỗi viện (có thì chia đợt cùng các file kia): bảng APACHE (thành phần GCS)
+FILE_TUY_CHON = ("apacheApsVar.csv",)
+
 
 def ma_vien(ten_thu_muc):
     """'hospital_146' -> '146'."""
@@ -58,10 +61,12 @@ def split_into_timestamps(staging_dir=None, save_root=None, in_chi_tiet=None):
         hosp_dir = os.path.join(staging_dir, hosp)
         save_dir = os.path.join(save_root, hosp)
 
-        # 1. Đọc 3 file dữ liệu gốc của bệnh viện này
+        # 1. Đọc 3 file dữ liệu gốc của bệnh viện này (+ file không bắt buộc nếu có)
         p_df = pd.read_csv(os.path.join(hosp_dir, "patient.csv"))
         l_df = pd.read_csv(os.path.join(hosp_dir, "lab.csv"))
         v_df = pd.read_csv(os.path.join(hosp_dir, "vitalPeriodic.csv"))
+        tuy_chon = {ten: pd.read_csv(os.path.join(hosp_dir, ten)) for ten in FILE_TUY_CHON
+                    if os.path.isfile(os.path.join(hosp_dir, ten))}
 
         # 2. Lấy danh sách ID bệnh nhân duy nhất và chia làm 3
         # Dùng unique() để không bị trùng ID
@@ -91,6 +96,8 @@ def split_into_timestamps(staging_dir=None, save_root=None, in_chi_tiet=None):
             p_batch.to_csv(os.path.join(target_dir, "patient.csv"), index=False)
             l_batch.to_csv(os.path.join(target_dir, "lab.csv"), index=False)
             v_batch.to_csv(os.path.join(target_dir, "vitalPeriodic.csv"), index=False)
+            for ten, df in tuy_chon.items():
+                df[df["patientunitstayid"].isin(batch_ids)].to_csv(os.path.join(target_dir, ten), index=False)
 
             if in_chi_tiet:
                 print(f"  ✅ Đợt {i + 1} ({time_folder}): {len(p_batch)} bệnh nhân, {len(l_batch)} lab, "

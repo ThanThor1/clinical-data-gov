@@ -106,6 +106,80 @@ def record_sample_lineage(db_path: Optional[str] = None, cac_vien: Optional[Iter
         record_lineage("standardized_labs", ai, {"lab_name": cot_ai}, "lọc theo loại xét nghiệm", db_path)
         record_lineage("standardized_labs", ai, {"patient_id": cot_ai}, "ghép theo bệnh nhân", db_path)
 
+    record_mortality_24h_lineage(db_path, cac_vien)
+
+
+def record_mortality_24h_lineage(db_path: Optional[str] = None, cac_vien: Optional[Iterable[str]] = None) -> None:
+    """
+    Lineage của bảng ai_ready_mortality_24h (mô hình XGBoost của nhóm AI, 23 đặc trưng 24 giờ đầu):
+    raw (patient, vital, lab, apache) -> standardized (patients, vitals, labs) -> ai_ready_mortality_24h.
+    """
+    for vien in (cac_vien if cac_vien is not None else "ABC"):
+        bn = f"raw_patient_hospital_{vien}"
+        record_lineage(bn, "standardized_patients", {"admissionheight": "height_cm"},
+                       "ép số thực; ngoài [100, 250] cm -> để trống", db_path)
+        record_lineage(bn, "standardized_patients", {"unitdischargeoffset": "icu_los_min"}, "đổi tên, ép số nguyên",
+                       db_path)
+        record_lineage(bn, "standardized_patients", {"hospitaldischargestatus": "hospitaldischargestatus"},
+                       "direct", db_path)
+
+        apache = f"raw_apache_hospital_{vien}"
+        for cot in ("eyes", "motor", "verbal"):
+            record_lineage(apache, "standardized_patients", {cot: "gcs"},
+                           "eyes + motor + verbal (-1 -> trống); ngoài [3, 15] -> trống", db_path)
+        record_lineage(apache, "standardized_patients", {"gcs": "gcs"},
+                       "nguồn chỉ ghi tổng điểm; ngoài [3, 15] -> trống", db_path)
+
+        vital = f"raw_vital_hospital_{vien}"
+        record_lineage(vital, "standardized_vitals",
+                       {"patientunitstayid": "patient_id", "observationoffset": "observation_offset"},
+                       "đổi tên cột", db_path)
+        record_lineage(vital, "standardized_vitals", {"heartrate": "heartrate"},
+                       "ngoài khoảng của hợp đồng raw_vital -> để trống", db_path)
+        for cot, mo_ta in (("systemicmean", "< 20 -> để trống"), ("sao2", "ngoài (0, 100] -> để trống"),
+                           ("respiration", "< 5 -> để trống"),
+                           ("temperature", "> 45 coi là °F, đổi sang °C; ngoài [30, 45] -> để trống")):
+            record_lineage(vital, "standardized_vitals", {cot: cot}, mo_ta, db_path)
+        record_lineage(vital, "standardized_vitals", {"_file": "source_hospital"},
+                       "mã viện lấy từ đường dẫn file: hospital_<mã>/<đợt>/...", db_path)
+        record_lineage(vital, "standardized_vitals", {"_file": "source_batch"},
+                       "đợt gửi lấy từ đường dẫn file: hospital_<mã>/<đợt>", db_path)
+
+        record_lineage(f"raw_lab_hospital_{vien}", "standardized_labs", {"labresultoffset": "lab_offset"},
+                       "đổi tên, ép số nguyên", db_path)
+
+    ai = "ai_ready_mortality_24h"
+    p = "standardized_patients"
+    record_lineage(p, ai, {"patient_id": "patient_hash"}, "giả danh hóa HMAC-SHA256 (khóa bí mật)", db_path)
+    record_lineage(p, ai, {"source_hospital": "source_system"}, "tra hệ thống nguồn trong sources/*.yaml", db_path)
+    record_lineage(p, ai, {"age": "age"}, "cohort: tuổi >= 18", db_path)
+    record_lineage(p, ai, {"icu_los_min": "mortality"}, "cohort: nằm ICU >= 240 phút (trống: nguồn không ghi)",
+                   db_path)
+    record_lineage(p, ai, {"gender": "male_sex"}, "M -> 1, F -> 0, còn lại -> trống", db_path)
+    record_lineage(p, ai, {"weight_kg": "bmi", "height_cm": "bmi"},
+                   "cân nặng [20, 300] kg / (chiều cao m)^2; ngoài [10, 80] -> trống", db_path)
+    record_lineage(p, ai, {"gcs": "gcs"}, "direct", db_path)
+    record_lineage(p, ai, {"hospitaldischargestatus": "mortality"}, "Expired -> 1, Alive -> 0", db_path)
+
+    for cot_std, cac_cot_ai in (("heartrate", ("heartrate_mean", "heartrate_min", "heartrate_max")),
+                                ("systemicmean", ("systemicmean_max",)), ("sao2", ("sao2_mean", "sao2_min")),
+                                ("respiration", ("respiration_mean", "respiration_max")),
+                                ("temperature", ("temperature_mean",))):
+        for cot_ai in cac_cot_ai:
+            record_lineage("standardized_vitals", ai, {cot_std: cot_ai},
+                           f"{cot_ai.rsplit('_', 1)[1]} theo bệnh nhân, 0 <= observation_offset <= 1440", db_path)
+
+    for cot_ai in COT_XET_NGHIEM_24H:
+        ten, ham = cot_ai.rsplit("_", 1)
+        record_lineage("standardized_labs", ai, {"lab_value": cot_ai},
+                       f"{ham} theo bệnh nhân, lab_name ~ {ten}, 0 <= lab_offset <= 1440", db_path)
+        record_lineage("standardized_labs", ai, {"lab_name": cot_ai}, "chuẩn hóa tên xét nghiệm rồi lọc", db_path)
+
+
+# Đặc trưng xét nghiệm của ai_ready_mortality_24h (pipeline/build_ai_ready.py dùng cùng danh sách)
+COT_XET_NGHIEM_24H = ("creatinine_max", "bun_mean", "lactate_mean", "lactate_max", "wbc_mean", "hemoglobin_mean",
+                      "platelets_mean", "bilirubin_mean", "glucose_mean", "glucose_max")
+
 
 def record_rename_lineage(table: str, cot_moi: str, cot_chuan: str, ghi_chu: str,
                           db_path: Optional[str] = None) -> None:

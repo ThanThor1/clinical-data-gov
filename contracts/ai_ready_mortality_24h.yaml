@@ -1,0 +1,248 @@
+# Hợp đồng dữ liệu: bảng AI-READY cho mô hình dự đoán TỬ VONG TRONG BỆNH VIỆN từ 24 giờ đầu nằm ICU
+# (mô hình XGBoost + SHAP của nhóm AI: intelligence/ml_mortality/, 23 đặc trưng).
+# Ý nghĩa các trường: xem contracts/raw_patient.yaml
+# tier: ai_ready -> gate1 áp thêm luật quyền riêng tư: không cột định danh, không cột ngoài hợp đồng.
+#
+# Cohort: tuổi >= 18, nằm ICU >= 240 phút (nguồn không ghi thời gian nằm ICU thì giữ: Challenge 2012 chỉ gồm
+# các lượt nằm ICU >= 48 giờ), có nhãn hospitaldischargestatus.
+# Cửa sổ quan sát: 0 <= offset <= 1440 phút. Giá trị thiếu để trống (XGBoost tự xử lý), không điền.
+# Mô hình dùng 23 cột từ age tới glucose_max; patient_hash và source_system không đưa vào mô hình.
+
+name: ai_ready_mortality_24h
+description: 23 đặc trưng 24 giờ đầu + nhãn tử vong trong bệnh viện, đã giả danh hóa, cho mô hình XGBoost
+applies_to:
+  - ai_ready_mortality_24h
+owner: Nhóm nghiên cứu AI
+version: "1.0"
+tier: ai_ready
+
+columns:
+  patient_hash:
+    type: string
+    required: true
+    nullable: false
+    max_null_pct: 0
+    pattern: "^[0-9a-f]{64}$"
+    sensitive: false
+    description: Mã giả danh của bệnh nhân (HMAC-SHA256, không dò ngược được nếu không có khóa)
+
+  source_system:
+    type: string
+    required: true
+    nullable: false
+    max_null_pct: 0
+    sensitive: false
+    description: Hệ thống nguồn (sources/*.yaml) - để đánh giá mô hình theo từng nguồn, không phải đặc trưng
+
+  # ----- Nhân khẩu -----
+  age:
+    type: int
+    required: true
+    nullable: false
+    max_null_pct: 0
+    min: 18
+    max: 120
+    sensitive: false
+    description: Tuổi (người trên 89 tuổi gộp thành 90)
+
+  male_sex:
+    type: int
+    required: true
+    nullable: true
+    max_null_pct: 10
+    min: 0
+    max: 1
+    sensitive: false
+    description: 1 = nam, 0 = nữ, trống = không rõ
+
+  bmi:
+    type: float
+    required: true
+    nullable: true
+    min: 10
+    max: 80
+    sensitive: false
+    description: Cân nặng (kg, trong [20, 300]) / chiều cao (m)^2; ngoài [10, 80] -> trống
+
+  # ----- Thần kinh -----
+  gcs:
+    type: int
+    required: true
+    nullable: true
+    min: 3
+    max: 15
+    sensitive: false
+    description: Điểm hôn mê Glasgow (3-15)
+
+  # ----- Sinh hiệu trong 24 giờ đầu -----
+  heartrate_mean:
+    type: float
+    required: true
+    nullable: true
+    min: 20
+    max: 300
+    sensitive: false
+    description: Nhịp tim trung bình (lần/phút)
+
+  heartrate_min:
+    type: float
+    required: true
+    nullable: true
+    min: 20
+    max: 300
+    sensitive: false
+    description: Nhịp tim thấp nhất
+
+  heartrate_max:
+    type: float
+    required: true
+    nullable: true
+    min: 20
+    max: 300
+    sensitive: false
+    description: Nhịp tim cao nhất
+
+  systemicmean_max:
+    type: float
+    required: true
+    nullable: true
+    min: 20
+    sensitive: false
+    description: Huyết áp động mạch trung bình cao nhất (mmHg)
+
+  sao2_mean:
+    type: float
+    required: true
+    nullable: true
+    min: 1
+    max: 100
+    sensitive: false
+    description: Độ bão hòa oxy trung bình (%)
+
+  sao2_min:
+    type: float
+    required: true
+    nullable: true
+    min: 1
+    max: 100
+    sensitive: false
+    description: Độ bão hòa oxy thấp nhất (%)
+
+  respiration_mean:
+    type: float
+    required: true
+    nullable: true
+    min: 5
+    sensitive: false
+    description: Nhịp thở trung bình (lần/phút)
+
+  respiration_max:
+    type: float
+    required: true
+    nullable: true
+    min: 5
+    sensitive: false
+    description: Nhịp thở cao nhất (lần/phút)
+
+  temperature_mean:
+    type: float
+    required: true
+    nullable: true
+    min: 30
+    max: 45
+    sensitive: false
+    description: Nhiệt độ trung bình (°C)
+
+  # ----- Xét nghiệm trong 24 giờ đầu (đơn vị như eICU) -----
+  creatinine_max:
+    type: float
+    required: true
+    nullable: true
+    min: 0
+    sensitive: false
+    description: Creatinine cao nhất (mg/dL)
+
+  bun_mean:
+    type: float
+    required: true
+    nullable: true
+    min: 0
+    sensitive: false
+    description: BUN trung bình (mg/dL)
+
+  lactate_mean:
+    type: float
+    required: true
+    nullable: true
+    min: 0
+    sensitive: false
+    description: Lactate trung bình (mmol/L)
+
+  lactate_max:
+    type: float
+    required: true
+    nullable: true
+    min: 0
+    sensitive: false
+    description: Lactate cao nhất (mmol/L)
+
+  wbc_mean:
+    type: float
+    required: true
+    nullable: true
+    min: 0
+    max: 100
+    sensitive: false
+    description: Bạch cầu trung bình (x1000/µL); > 100 -> trống
+
+  hemoglobin_mean:
+    type: float
+    required: true
+    nullable: true
+    min: 0
+    sensitive: false
+    description: Hemoglobin trung bình (g/dL); Challenge 2012 không đo -> trống
+
+  platelets_mean:
+    type: float
+    required: true
+    nullable: true
+    min: 0
+    sensitive: false
+    description: Tiểu cầu trung bình (x1000/µL)
+
+  bilirubin_mean:
+    type: float
+    required: true
+    nullable: true
+    min: 0
+    sensitive: false
+    description: Bilirubin toàn phần trung bình (mg/dL)
+
+  glucose_mean:
+    type: float
+    required: true
+    nullable: true
+    min: 0
+    sensitive: false
+    description: Glucose trung bình (mg/dL, gồm cả glucose tại giường)
+
+  glucose_max:
+    type: float
+    required: true
+    nullable: true
+    min: 0
+    sensitive: false
+    description: Glucose cao nhất (mg/dL)
+
+  # ----- Nhãn -----
+  mortality:
+    type: int
+    required: true
+    nullable: false
+    max_null_pct: 0
+    min: 0
+    max: 1
+    sensitive: false
+    semantics: in_hospital_death
+    description: Nhãn - 1 nếu tử vong trong bệnh viện (hospitaldischargestatus == 'Expired'), 0 nếu sống

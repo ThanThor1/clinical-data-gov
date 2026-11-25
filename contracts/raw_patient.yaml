@@ -17,13 +17,15 @@
 # (pipeline/source_adapters.py) ánh xạ về đúng các cột này theo sổ đăng ký nguồn sources/*.yaml.
 # v1.1: hospitalid không còn bắt buộc (chỉ eICU có; nguồn của lô lấy từ đường dẫn gửi lên),
 #       thêm semantics cho unitdischargestatus
+# v1.2: thêm admissionheight, unitdischargeoffset, hospitaldischargestatus (không bắt buộc) cho bảng
+#       ai_ready_mortality_24h; không đặt min/max ở tầng raw, giá trị phi sinh lý bị để trống khi chuẩn hóa
 
 name: raw_patient
 description: Bảng bệnh nhân thô theo schema chuẩn (tên cột của eICU)
 applies_to:
   - raw_patient_hospital_*
 owner: Đội IT bệnh viện nguồn
-version: "1.1"
+version: "1.2"
 tier: raw
 
 columns:
@@ -92,3 +94,30 @@ columns:
     sensitive: false
     semantics: icu_discharge_status
     description: Tình trạng lúc ra khỏi ICU (Alive / Expired)
+
+  # ----- v1.2: các cột cho mô hình dự đoán tử vong trong bệnh viện (ai_ready_mortality_24h) -----
+  # Không bắt buộc (nguồn cũ / dữ liệu giả có thể không có) và không đặt min/max: dữ liệu thật có chiều cao
+  # 0,3 cm hay 600 cm -> để trống khi chuẩn hóa (standardized_patients.height_cm), không chặn cả lô
+  admissionheight:
+    type: float
+    required: false
+    nullable: true
+    sensitive: false
+    description: Chiều cao lúc nhập ICU (cm)
+
+  unitdischargeoffset:
+    type: int
+    required: false
+    nullable: true
+    sensitive: false
+    description: Thời gian nằm ICU, số phút từ lúc nhập tới lúc ra ICU
+
+  # Nhãn của mô hình dự đoán tử vong TRONG BỆNH VIỆN (khác unitdischargestatus: lúc ra ICU)
+  hospitaldischargestatus:
+    type: category
+    required: false
+    nullable: true
+    allowed_values: [Alive, Expired]
+    sensitive: false
+    semantics: in_hospital_death
+    description: Tình trạng lúc ra viện (Alive / Expired)

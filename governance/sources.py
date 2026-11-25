@@ -24,7 +24,7 @@ from governance.contracts import contract_label, find_contract
 from governance.lineage import record_lineage
 
 SOURCES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sources"))
-LOAI_BANG = ("patient", "vital", "lab")
+LOAI_BANG = ("patient", "vital", "lab", "apache")
 
 _BO_NHO_DEM: dict = {}
 
@@ -81,6 +81,8 @@ def mapping_edges(nguon: dict, ma_vien: str) -> list[tuple[str, str, str, str, s
     thieu = f"; {nguon['missing_value']} -> trống" if "missing_value" in nguon else ""
     ma_id = nguon["id_parameter"]
     for loai in LOAI_BANG:
+        if loai == "apache" and not nguon.get("apache"):
+            continue
         bang = f"raw_{loai}_hospital_{ma_vien}"
         canh.append((native_table(nguon), ma_id, bang, "patientunitstayid", "mã lượt nằm ICU"))
         if loai in ("vital", "lab"):
@@ -96,6 +98,9 @@ def mapping_edges(nguon: dict, ma_vien: str) -> list[tuple[str, str, str, str, s
                      f"raw_patient_hospital_{ma_vien}", cot, "; ".join(mo_ta) + thieu if mo_ta else "direct" + thieu))
     for cot, luat in nguon.get("vital", {}).items():
         canh.append((native_table(nguon), luat["from"], f"raw_vital_hospital_{ma_vien}", cot, "direct" + thieu))
+    for cot, luat in (nguon.get("apache") or {}).items():
+        canh.append((native_table(nguon), luat["from"], f"raw_apache_hospital_{ma_vien}", cot,
+                     f"luật: {luat.get('rule', 'first')}" + thieu))
     for tham_so, luat in nguon.get("lab", {}).items():
         mo_ta = f"labname = '{luat['to']}'" + (f", x{luat['scale']} ({luat.get('note', '')})" if "scale" in luat else "")
         canh.append((native_table(nguon), tham_so, f"raw_lab_hospital_{ma_vien}", "labresult", mo_ta))

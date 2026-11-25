@@ -1,6 +1,6 @@
 """
 Mô phỏng nhiều bệnh viện: tách dữ liệu eICU demo (data/01_landing) thành từng bệnh viện
--> data/02_staging/hospital_<hospitalid>/{patient,lab,vitalPeriodic}.csv
+-> data/02_staging/hospital_<hospitalid>/{patient,lab,vitalPeriodic}.csv (+ apacheApsVar.csv nếu đã tải, xem README)
 
 Mặc định lấy TẤT CẢ bệnh viện (eICU demo có 186 viện, 2.520 bệnh nhân, khoảng 2 triệu dòng).
 Đây là bước giả lập phía bệnh viện (nằm ngoài hệ thống governance) nên dùng pandas cho đơn giản.
@@ -28,6 +28,9 @@ STAGING_DIR = os.path.join(ROOT, "data", "02_staging")
 LAB_DATA_ORIGINAL = os.path.join(LANDING_DIR, "lab.csv")
 PATIENT_DATA_ORIGINAL = os.path.join(LANDING_DIR, "patient.csv")
 VITAL_PERIODIC_DATA_ORIGINAL = os.path.join(LANDING_DIR, "vitalPeriodic.csv")
+
+# Bảng không bắt buộc: chưa tải thì bỏ qua (GCS của bảng ai_ready_mortality_24h để trống)
+FILE_TUY_CHON = ("apacheApsVar.csv",)
 
 
 def main(top=None, landing_dir=None, staging_dir=None):
@@ -63,6 +66,14 @@ def main(top=None, landing_dir=None, staging_dir=None):
     }
     cot_goc = {"patient.csv": patient_df.columns, "lab.csv": lab_df.columns,
                "vitalPeriodic.csv": vitalPeriodic_df.columns}
+    for ten_file in FILE_TUY_CHON:
+        duong_dan = os.path.join(landing_dir, ten_file)
+        if not os.path.isfile(duong_dan):
+            print(f"  Không có {ten_file} trong {landing_dir}: bỏ qua bảng không bắt buộc này")
+            continue
+        df = pd.read_csv(duong_dan)
+        nhom[ten_file] = df.groupby(df["patientunitstayid"].map(vien_cua_bn))
+        cot_goc[ten_file] = df.columns
     for hospital_id in cac_vien:
         target_dir = os.path.join(staging_dir, f"hospital_{hospital_id}")
         os.makedirs(target_dir, exist_ok=True)
